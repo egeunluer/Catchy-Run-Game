@@ -1,0 +1,22 @@
+[project]
+name = "catcher_vs_runner"
+version = "0.1.0"
+description = "Two-agent adversarial grid game (9x9). Engine kept Gymnasium-friendly for later DRL wrapping."
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pygame>=2.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+catcher-vs-runner = "catcher_vs_runner.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["catcher_vs_runner*"]
