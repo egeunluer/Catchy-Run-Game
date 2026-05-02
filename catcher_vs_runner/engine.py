@@ -5,16 +5,25 @@ Contract (load-bearing for the future Gymnasium / PettingZoo wrapper):
 * Imports only `numpy` and the standard library. Importing this module has
   zero side effects.
 * `GameState` is an immutable, hashable, picklable dataclass holding the
-  full state.
+  full state, including in-flight projectiles fired by the catcher.
 * `step(state, action)` is a pure function — it does not mutate `state`.
-* The action space is a frozen size-17 discrete encoding (see `actions.py`).
-* `legal_action_mask(state)` returns a `(17,)` boolean array. `step` raises
+* The action space is a frozen size-33 discrete encoding (see `actions.py`).
+* `legal_action_mask(state)` returns a `(33,)` boolean array. `step` raises
   `ValueError` on illegal actions, so a buggy wrapper fails loudly.
-* `encode_observation(state, perspective)` returns a `(C, 9, 9) float32`
-  tensor. `perspective` is `"runner"` or `"catcher"` and swaps own / opponent
-  channels — the same observation shape works for both roles.
+* `encode_observation(state, perspective)` returns an
+  `(OBS_CHANNELS, BOARD_SIZE, BOARD_SIZE)` float32 tensor. `perspective` is
+  `"runner"` or `"catcher"` and swaps own / opponent channels — the same
+  observation shape works for both roles.
 * `reset(seed=None)` accepts a seed (currently unused; reserved for future
   randomized variants) and returns a deterministic starting state.
+
+Roles:
+* Only the runner places and removes walls (in any of 8 surrounding cells,
+  capped at `RUNNER_WALL_CAP`).
+* The catcher cannot place walls; its special action is shoot, which spawns
+  a projectile in any of 8 directions. Projectiles advance one cell per
+  half-turn, are destroyed by walls (taking the wall with them), and end
+  the game in the catcher's favor on contact with the runner.
 """
 
 from __future__ import annotations
@@ -28,6 +37,7 @@ from .actions import (
     ACTION_NAMES,
     ACTION_SPACE_SIZE,
     ACTION_WAIT,
+    CARDINAL_DIRS,
     MOVE_ACTIONS,
     PLACE_WALL_ACTIONS,
     REMOVE_WALL_ACTIONS,
@@ -37,16 +47,11 @@ from .actions import (
 
 # --- Tunable game parameters ---------------------------------------------
 
-BOARD_SIZE: int = 9
-# Half-moves total. Tuned from the original design value of 30: at 30, greedy
-# heuristics produce a ~90% runner win rate because the catcher cannot close
-# 16 cells in 15 half-moves under same-speed greedy play. 65 lands at ~53%
-# runner-wins under heuristic-vs-heuristic, inside the target 45-55% band.
-TURN_LIMIT: int = 65
-RUNNER_WALL_CAP: int = 4
-CATCHER_WALL_CAP: int = 3
+BOARD_SIZE: int = 6
+TURN_LIMIT: int = 40
+RUNNER_WALL_CAP: int = 2
+WALL_LIFETIME: int = 4  # half-turns a wall stays on the board after placement
 SPRINT_CHARGES: int = 3
-VAULT_CHARGES: int = 3
 RUNNER_START: tuple[int, int] = (0, 0)
 CATCHER_START: tuple[int, int] = (BOARD_SIZE - 1, BOARD_SIZE - 1)
 
@@ -54,6 +59,11 @@ OBS_CHANNELS: int = 7
 
 Agent = Literal["runner", "catcher"]
 Position = tuple[int, int]
+Projectile = tuple[Position, tuple[int, int]]  # (position, direction)
+# A wall is a (cell, expiry_turn) pair. Expiry is the latest turn-index at
+# which the wall is still on the board; once `state.turn > expiry_turn` it
+# is pruned automatically inside `_apply`.
+Wall = tuple[Position, int]
 
 
 # --- State ---------------------------------------------------------------
@@ -61,24 +71,23 @@ Position = tuple[int, int]
 
 @dataclass(frozen=True, slots=True)
 class GameState:
-    """Full game state. Frozen — all transitions return a new instance."""
+    """Full game state. Frozen — all transitions return a new instance.
+
+    Walls are owned by the runner only; there is no `catcher_walls` field
+    because the catcher cannot place walls. Each wall carries an expiry turn
+    so it can disappear automatically `WALL_LIFETIME` half-turns after it
+    was placed.
+    """
 
     runner_pos: Position
     catcher_pos: Position
-    runner_walls: frozenset[Position]
-    catcher_walls: frozenset[Position]
+    walls: frozenset[Wall]
     sprint_charges: int
-    vault_charges: int
+    projectiles: frozenset[Projectile]
     current_agent: Agent
     turn: int
     terminated: bool
     winner: Optional[Agent]
-
-    def all_walls(self) -> frozenset[Position]:
-        return self.runner_walls | self.catcher_walls
-
-    def own_walls(self) -> frozenset[Position]:
-        return self.runner_walls if self.current_agent == "runner" else self.catcher_walls
 
     def own_position(self) -> Position:
         return self.runner_pos if self.current_agent == "runner" else self.catcher_pos
@@ -86,8 +95,8 @@ class GameState:
     def opponent_position(self) -> Position:
         return self.catcher_pos if self.current_agent == "runner" else self.runner_pos
 
-    def own_wall_cap(self) -> int:
-        return RUNNER_WALL_CAP if self.current_agent == "runner" else CATCHER_WALL_CAP
+    def wall_positions(self) -> frozenset[Position]:
+        return frozenset(p for (p, _) in self.walls)
 
 
 # --- Lifecycle -----------------------------------------------------------
@@ -97,10 +106,9 @@ def reset(seed: Optional[int] = None) -> GameState:  # noqa: ARG001 — seed res
     return GameState(
         runner_pos=RUNNER_START,
         catcher_pos=CATCHER_START,
-        runner_walls=frozenset(),
-        catcher_walls=frozenset(),
+        walls=frozenset(),
         sprint_charges=SPRINT_CHARGES,
-        vault_charges=VAULT_CHARGES,
+        projectiles=frozenset(),
         current_agent="runner",
         turn=0,
         terminated=False,
@@ -133,15 +141,15 @@ def _is_legal(state: GameState, action: int) -> bool:
 
     pos = state.own_position()
     other = state.opponent_position()
-    walls = state.all_walls()
     actor = state.current_agent
     dx, dy = direction_of(action)
+    wall_positions = state.wall_positions()
 
     if action in MOVE_ACTIONS:
         target = (pos[0] + dx, pos[1] + dy)
         if not _in_bounds(target):
             return False
-        if target in walls:
+        if target in wall_positions:
             return False
         # Runner refuses to volunteer capture; catcher landing on runner = win.
         if actor == "runner" and target == other:
@@ -149,56 +157,93 @@ def _is_legal(state: GameState, action: int) -> bool:
         return True
 
     if action in PLACE_WALL_ACTIONS:
-        if len(state.own_walls()) >= state.own_wall_cap():
+        # Only the runner can place walls.
+        if actor != "runner":
+            return False
+        if len(state.walls) >= RUNNER_WALL_CAP:
             return False
         target = (pos[0] + dx, pos[1] + dy)
         if not _in_bounds(target):
             return False
-        if target in walls:
+        if target in wall_positions:
             return False
         if target == other:
             return False
         return True
 
     if action in REMOVE_WALL_ACTIONS:
+        # Only the runner can remove walls.
+        if actor != "runner":
+            return False
         target = (pos[0] + dx, pos[1] + dy)
-        return target in state.own_walls()
+        return target in wall_positions
 
     if action in SPECIAL_ACTIONS:
-        mid = (pos[0] + dx, pos[1] + dy)
-        dest = (pos[0] + 2 * dx, pos[1] + 2 * dy)
-        if not _in_bounds(dest):
-            return False
-        if actor == "runner":  # Sprint
+        if actor == "runner":  # Sprint — 2-cell cardinal jump only.
+            if (dx, dy) not in CARDINAL_DIRS:
+                return False
             if state.sprint_charges <= 0:
                 return False
-            if mid in walls or dest in walls:
+            mid = (pos[0] + dx, pos[1] + dy)
+            dest = (pos[0] + 3 * dx, pos[1] + 3 * dy)
+            if not _in_bounds(dest):
+                return False
+            if mid in wall_positions or dest in wall_positions:
                 return False
             # Cannot sprint through or onto the catcher.
             if mid == other or dest == other:
                 return False
             return True
-        # Vault (catcher)
-        if state.vault_charges <= 0:
-            return False
-        if mid not in walls:
-            return False  # need a wall to vault over
-        if dest in walls:
-            return False  # cannot land on a wall
-        # Landing on the runner is fine — that is the capture.
-        return True
+        # Shoot (catcher) — fires a projectile in any of the 8 directions.
+        # Legal iff there is at least one in-bounds cell for the bullet to
+        # travel into; otherwise the shot would immediately leave the board.
+        first_cell = (pos[0] + dx, pos[1] + dy)
+        return _in_bounds(first_cell)
 
     return False
 
 
 def legal_action_mask(state: GameState) -> np.ndarray:
-    """Boolean mask of shape (17,). All False if state is terminal."""
+    """Boolean mask of shape (33,). All False if state is terminal."""
     mask = np.zeros(ACTION_SPACE_SIZE, dtype=bool)
     if state.terminated:
         return mask
     for a in range(ACTION_SPACE_SIZE):
         mask[a] = _is_legal(state, a)
     return mask
+
+
+# --- Projectile helpers --------------------------------------------------
+
+
+def _tick_projectiles(
+    projectiles: frozenset[Projectile],
+    walls: frozenset[Wall],
+) -> tuple[frozenset[Projectile], frozenset[Wall]]:
+    """Advance every projectile by one cell.
+
+    Resolution rules:
+    * Off-board next cell → projectile despawns.
+    * Wall on next cell → both the wall and the projectile are destroyed.
+    * Otherwise → projectile continues at the new cell.
+
+    Runner-collision is handled by the caller after the tick using the
+    returned projectile set, so this function is pure over walls/projectiles.
+    """
+    new_projectiles: set[Projectile] = set()
+    walls_by_pos: dict[Position, int] = {p: exp for (p, exp) in walls}
+
+    for pos, direction in projectiles:
+        nx, ny = pos[0] + direction[0], pos[1] + direction[1]
+        new_pos: Position = (nx, ny)
+        if not _in_bounds(new_pos):
+            continue
+        if new_pos in walls_by_pos:
+            del walls_by_pos[new_pos]
+            continue
+        new_projectiles.add((new_pos, direction))
+
+    return frozenset(new_projectiles), frozenset(walls_by_pos.items())
 
 
 # --- Transition ----------------------------------------------------------
@@ -209,10 +254,9 @@ def _apply(state: GameState, action: int) -> tuple[GameState, float, float]:
     actor = state.current_agent
     rx, ry = state.runner_pos
     cx, cy = state.catcher_pos
-    runner_walls = state.runner_walls
-    catcher_walls = state.catcher_walls
+    walls = state.walls
     sprint = state.sprint_charges
-    vault = state.vault_charges
+    projectiles = state.projectiles
 
     if action != ACTION_WAIT:
         dx, dy = direction_of(action)
@@ -222,33 +266,32 @@ def _apply(state: GameState, action: int) -> tuple[GameState, float, float]:
             else:
                 cx, cy = cx + dx, cy + dy
         elif action in PLACE_WALL_ACTIONS:
-            target = (
-                (rx + dx, ry + dy) if actor == "runner" else (cx + dx, cy + dy)
-            )
-            if actor == "runner":
-                runner_walls = runner_walls | {target}
-            else:
-                catcher_walls = catcher_walls | {target}
+            target = (rx + dx, ry + dy)
+            walls = walls | {(target, state.turn + WALL_LIFETIME)}
         elif action in REMOVE_WALL_ACTIONS:
-            target = (
-                (rx + dx, ry + dy) if actor == "runner" else (cx + dx, cy + dy)
-            )
-            if actor == "runner":
-                runner_walls = runner_walls - {target}
-            else:
-                catcher_walls = catcher_walls - {target}
+            target = (rx + dx, ry + dy)
+            walls = frozenset(w for w in walls if w[0] != target)
         elif action in SPECIAL_ACTIONS:
-            if actor == "runner":  # Sprint
-                rx, ry = rx + 2 * dx, ry + 2 * dy
+            if actor == "runner":  # Sprint — cardinal jump.
+                rx, ry = rx + 3 * dx, ry + 3 * dy
                 sprint -= 1
-            else:  # Vault
-                cx, cy = cx + 2 * dx, cy + 2 * dy
-                vault -= 1
+            else:  # Shoot — spawn projectile at catcher's cell with direction.
+                projectiles = projectiles | {((cx + dx, cy + dy), (dx, dy))}
+
+    # Tick all projectiles once at the end of every half-turn.
+    if actor == "runner":
+        projectiles, walls = _tick_projectiles(projectiles, walls)
 
     new_turn = state.turn + 1
+    # Prune walls whose lifetime has elapsed. A wall placed at turn N has
+    # `expiry = N + WALL_LIFETIME` and stays on the board through turns
+    # N+1 .. N+WALL_LIFETIME. It is removed once `new_turn > expiry`.
+    walls = frozenset((p, exp) for (p, exp) in walls if exp >= new_turn)
     next_agent: Agent = "catcher" if actor == "runner" else "runner"
 
-    captured = (rx, ry) == (cx, cy)
+    captured_by_move = (rx, ry) == (cx, cy)
+    bullet_hit_runner = any(p == (rx, ry) for (p, _) in projectiles)
+    captured = captured_by_move or bullet_hit_runner
     timed_out = (not captured) and new_turn >= TURN_LIMIT
     terminated = captured or timed_out
 
@@ -265,10 +308,9 @@ def _apply(state: GameState, action: int) -> tuple[GameState, float, float]:
     new_state = GameState(
         runner_pos=(rx, ry),
         catcher_pos=(cx, cy),
-        runner_walls=runner_walls,
-        catcher_walls=catcher_walls,
-        sprint_charges=sprint,
-        vault_charges=vault,
+        walls=walls,
+        sprint_charges= sprint,
+        projectiles=projectiles,
         current_agent=next_agent,
         turn=new_turn,
         terminated=terminated,
@@ -283,7 +325,7 @@ def step(
     """Apply `action` to `state`. Pure: `state` is not mutated.
 
     Returns: (new_state, reward_runner, reward_catcher, terminated,
-    truncated, info). `truncated` is always False here — the 30-turn limit
+    truncated, info). `truncated` is always False here — the turn limit
     is encoded as `terminated=True` with `winner="runner"`, since for this
     game it is a real terminal condition (runner wins), not a wrapper-side
     truncation.
@@ -306,18 +348,23 @@ def step(
 
 
 def encode_observation(state: GameState, perspective: Agent) -> np.ndarray:
-    """Return a (7, 9, 9) float32 tensor. Channels:
+    """Return an `(OBS_CHANNELS, BOARD_SIZE, BOARD_SIZE)` float32 tensor.
 
-    0: own position (one-hot)
-    1: opponent position (one-hot)
-    2: own walls
-    3: opponent walls
-    4: own charges remaining (normalized scalar broadcast)
-    5: opponent charges remaining (normalized scalar broadcast)
-    6: turn number (normalized scalar broadcast)
+    Channels:
+        0: own position (one-hot)
+        1: opponent position (one-hot)
+        2: walls (only the runner places walls, so this is shared)
+        3: own charges remaining (normalized scalar broadcast)
+        4: opponent charges remaining (normalized scalar broadcast)
+        5: turn number (normalized scalar broadcast)
+        6: projectile mask (1.0 in any cell containing >= 1 projectile)
 
-    `perspective` swaps own / opponent so a single network can play either
-    role. Coordinates: array is indexed [channel, y, x].
+    `perspective` swaps own / opponent positions so a single network can
+    play either role. Coordinates: array is indexed [channel, y, x].
+
+    Charge channels: only the runner has a depletable charge (sprint). The
+    catcher's shoot is unlimited, so its charge channel is constant 0. The
+    slot is preserved so the tensor shape is symmetric across perspectives.
     """
     if perspective not in ("runner", "catcher"):
         raise ValueError(f"perspective must be 'runner' or 'catcher', got {perspective!r}")
@@ -326,24 +373,22 @@ def encode_observation(state: GameState, perspective: Agent) -> np.ndarray:
 
     if perspective == "runner":
         own_pos, opp_pos = state.runner_pos, state.catcher_pos
-        own_walls, opp_walls = state.runner_walls, state.catcher_walls
-        own_charges, own_max = state.sprint_charges, SPRINT_CHARGES
-        opp_charges, opp_max = state.vault_charges, VAULT_CHARGES
+        own_charges_norm = state.sprint_charges / max(SPRINT_CHARGES, 1)
+        opp_charges_norm = 0.0
     else:
         own_pos, opp_pos = state.catcher_pos, state.runner_pos
-        own_walls, opp_walls = state.catcher_walls, state.runner_walls
-        own_charges, own_max = state.vault_charges, VAULT_CHARGES
-        opp_charges, opp_max = state.sprint_charges, SPRINT_CHARGES
+        own_charges_norm = 0.0
+        opp_charges_norm = state.sprint_charges / max(SPRINT_CHARGES, 1)
 
     obs[0, own_pos[1], own_pos[0]] = 1.0
     obs[1, opp_pos[1], opp_pos[0]] = 1.0
-    for x, y in own_walls:
+    for (x, y), _expiry in state.walls:
         obs[2, y, x] = 1.0
-    for x, y in opp_walls:
-        obs[3, y, x] = 1.0
-    obs[4, :, :] = own_charges / max(own_max, 1)
-    obs[5, :, :] = opp_charges / max(opp_max, 1)
-    obs[6, :, :] = state.turn / TURN_LIMIT
+    obs[3, :, :] = own_charges_norm
+    obs[4, :, :] = opp_charges_norm
+    obs[5, :, :] = state.turn / TURN_LIMIT
+    for (px, py), _ in state.projectiles:
+        obs[6, py, px] = 1.0
 
     return obs
 

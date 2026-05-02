@@ -2,6 +2,9 @@
 
 Covers the engine contract: legality, mask consistency, win conditions,
 purity / determinism, and the observation shape & perspective behavior.
+Includes coverage for 8-direction movement, runner-only 8-direction wall
+placement, the catcher's 8-direction shoot mechanic, and the absence of
+both the old vault action and any catcher wall placement.
 """
 
 from __future__ import annotations
@@ -15,32 +18,44 @@ from catcher_vs_runner import engine
 from catcher_vs_runner.actions import (
     ACTION_MOVE_E,
     ACTION_MOVE_N,
+    ACTION_MOVE_NE,
+    ACTION_MOVE_NW,
     ACTION_MOVE_S,
+    ACTION_MOVE_SE,
+    ACTION_MOVE_SW,
     ACTION_MOVE_W,
     ACTION_PLACE_WALL_E,
     ACTION_PLACE_WALL_N,
+    ACTION_PLACE_WALL_NE,
     ACTION_PLACE_WALL_S,
+    ACTION_PLACE_WALL_SE,
     ACTION_PLACE_WALL_W,
     ACTION_REMOVE_WALL_E,
-    ACTION_REMOVE_WALL_N,
-    ACTION_REMOVE_WALL_W,
+    ACTION_REMOVE_WALL_NE,
     ACTION_SPACE_SIZE,
     ACTION_SPECIAL_E,
     ACTION_SPECIAL_N,
+    ACTION_SPECIAL_NE,
+    ACTION_SPECIAL_NW,
     ACTION_SPECIAL_S,
+    ACTION_SPECIAL_SE,
+    ACTION_SPECIAL_SW,
     ACTION_SPECIAL_W,
     ACTION_WAIT,
+    MOVE_ACTIONS,
+    PLACE_WALL_ACTIONS,
+    REMOVE_WALL_ACTIONS,
+    SPECIAL_ACTIONS,
 )
 from catcher_vs_runner.engine import (
     BOARD_SIZE,
     CATCHER_START,
-    CATCHER_WALL_CAP,
     OBS_CHANNELS,
     RUNNER_START,
     RUNNER_WALL_CAP,
     SPRINT_CHARGES,
     TURN_LIMIT,
-    VAULT_CHARGES,
+    WALL_LIFETIME,
     GameState,
     encode_observation,
     legal_action_mask,
@@ -50,6 +65,16 @@ from catcher_vs_runner.engine import (
 )
 
 
+def _walls(*positions: tuple[int, int], expiry: int = 999) -> frozenset:
+    """Build a wall frozenset from positions, all with the same expiry.
+
+    Tests that don't care about the lifetime use the default `expiry=999`
+    (effectively permanent within a test). Tests that specifically exercise
+    expiration pass an explicit expiry tied to `state.turn`.
+    """
+    return frozenset((p, expiry) for p in positions)
+
+
 # --- Reset / starting state ---------------------------------------------
 
 
@@ -57,10 +82,9 @@ def test_reset_starting_state():
     state = reset()
     assert state.runner_pos == RUNNER_START
     assert state.catcher_pos == CATCHER_START
-    assert state.runner_walls == frozenset()
-    assert state.catcher_walls == frozenset()
+    assert state.walls == frozenset()
     assert state.sprint_charges == SPRINT_CHARGES
-    assert state.vault_charges == VAULT_CHARGES
+    assert state.projectiles == frozenset()
     assert state.current_agent == "runner"
     assert state.turn == 0
     assert not state.terminated
@@ -69,9 +93,15 @@ def test_reset_starting_state():
 
 def test_reset_deterministic_for_same_seed():
     assert reset(seed=42) == reset(seed=42)
-    # Currently the seed has no effect; this test pins the contract so a
-    # future change can decide intentionally whether seeds diverge.
     assert reset(seed=1) == reset(seed=2)
+
+
+def test_action_space_layout():
+    assert ACTION_SPACE_SIZE == 33
+    assert len(MOVE_ACTIONS) == 8
+    assert len(PLACE_WALL_ACTIONS) == 8
+    assert len(REMOVE_WALL_ACTIONS) == 8
+    assert len(SPECIAL_ACTIONS) == 8
 
 
 # --- Movement -----------------------------------------------------------
@@ -85,16 +115,38 @@ def test_runner_can_move_orthogonally():
     assert new_state.turn == 1
 
 
+def test_runner_can_move_diagonally():
+    state = reset()
+    new_state, *_ = step(state, ACTION_MOVE_SE)
+    assert new_state.runner_pos == (1, 1)
+
+
+def test_catcher_can_move_diagonally():
+    state = with_overrides(reset(), current_agent="catcher")
+    new_state, *_ = step(state, ACTION_MOVE_NW)
+    assert new_state.catcher_pos == (BOARD_SIZE - 2, BOARD_SIZE - 2)
+
+
 def test_off_board_move_illegal():
-    state = reset()  # runner at (0, 0); N and W are off-board
+    state = reset()  # runner at (0, 0); N, W, NW, NE all off-board
     with pytest.raises(ValueError):
         step(state, ACTION_MOVE_N)
     with pytest.raises(ValueError):
         step(state, ACTION_MOVE_W)
+    with pytest.raises(ValueError):
+        step(state, ACTION_MOVE_NW)
+    with pytest.raises(ValueError):
+        step(state, ACTION_MOVE_NE)
+
+
+def test_diagonal_move_blocked_by_wall_at_destination():
+    state = with_overrides(reset(), walls=_walls((1, 1)))
+    with pytest.raises(ValueError):
+        step(state, ACTION_MOVE_SE)
 
 
 def test_move_into_wall_illegal():
-    state = with_overrides(reset(), runner_walls=frozenset({(1, 0)}))
+    state = with_overrides(reset(), walls=_walls((1, 0)))
     with pytest.raises(ValueError):
         step(state, ACTION_MOVE_E)
 
@@ -122,42 +174,88 @@ def test_catcher_capture_by_movement():
     assert new_state.runner_pos == new_state.catcher_pos
 
 
-# --- Walls --------------------------------------------------------------
+def test_catcher_capture_by_diagonal_move():
+    state = with_overrides(
+        reset(), runner_pos=(4, 4), catcher_pos=(3, 3), current_agent="catcher"
+    )
+    new_state, *_, terminated, _, _ = step(state, ACTION_MOVE_SE)
+    assert terminated
+    assert new_state.winner == "catcher"
 
 
-def test_place_and_remove_own_wall():
+def test_catcher_cannot_jump_over_wall():
+    state = with_overrides(
+        reset(),
+        runner_pos=(0, 0),
+        catcher_pos=(3, 3),
+        walls=_walls((4, 3)),
+        current_agent="catcher",
+    )
+    mask = legal_action_mask(state)
+    assert not mask[ACTION_MOVE_E]
+
+
+# --- Walls (runner only) ------------------------------------------------
+
+
+def test_runner_places_wall_orthogonal():
     state = reset()
-    state, *_ = step(state, ACTION_PLACE_WALL_E)  # runner places at (1, 0)
-    assert (1, 0) in state.runner_walls
-    assert state.current_agent == "catcher"
+    state, *_ = step(state, ACTION_PLACE_WALL_E)
+    assert (1, 0) in state.walls
 
-    # Catcher does something so it becomes runner's turn again.
-    state, *_ = step(state, ACTION_MOVE_W)
-    assert state.current_agent == "runner"
 
-    state, *_ = step(state, ACTION_REMOVE_WALL_E)
-    assert (1, 0) not in state.runner_walls
+def test_runner_places_wall_diagonal():
+    state = reset()
+    state, *_ = step(state, ACTION_PLACE_WALL_SE)
+    assert (1, 1) in state.walls
+
+
+def test_runner_can_place_wall_in_all_eight_directions():
+    state = with_overrides(reset(), runner_pos=(3, 3))
+    mask = legal_action_mask(state)
+    for action in PLACE_WALL_ACTIONS:
+        assert mask[action], f"{action} should be legal at (3, 3) with no walls"
+
+
+def test_runner_remove_diagonal_wall():
+    # Runner at (1, 1), wall to its NE at (2, 0).
+    state = with_overrides(reset(), runner_pos=(1, 1), walls=_walls((2, 0)))
+    state, *_ = step(state, ACTION_REMOVE_WALL_NE)
+    assert (2, 0) not in state.walls
+
+
+def test_catcher_cannot_place_walls():
+    state = with_overrides(reset(), current_agent="catcher")
+    mask = legal_action_mask(state)
+    for action in PLACE_WALL_ACTIONS:
+        assert not mask[action], f"catcher should not be able to place wall {action}"
+    with pytest.raises(ValueError):
+        step(state, ACTION_PLACE_WALL_N)
+
+
+def test_catcher_cannot_remove_walls():
+    state = with_overrides(
+        reset(),
+        catcher_pos=(3, 3),
+        walls=_walls((3, 2), (4, 3)),
+        current_agent="catcher",
+    )
+    mask = legal_action_mask(state)
+    for action in REMOVE_WALL_ACTIONS:
+        assert not mask[action]
 
 
 def test_runner_wall_cap_enforced():
-    walls = frozenset({(2, 0), (3, 0), (4, 0), (5, 0)})  # cap = 4
+    # Pick `RUNNER_WALL_CAP` positions on row 0 starting at (2, 0).
+    positions = tuple((2 + i, 0) for i in range(RUNNER_WALL_CAP))
+    walls = _walls(*positions)
     assert len(walls) == RUNNER_WALL_CAP
-    state = with_overrides(reset(), runner_walls=walls)
+    state = with_overrides(reset(), walls=walls)
     mask = legal_action_mask(state)
-    # All four place-wall directions illegal because cap reached.
-    assert not mask[ACTION_PLACE_WALL_E]
-    assert not mask[ACTION_PLACE_WALL_S]
+    for action in PLACE_WALL_ACTIONS:
+        assert not mask[action]
     with pytest.raises(ValueError):
         step(state, ACTION_PLACE_WALL_E)
-
-
-def test_catcher_wall_cap_smaller():
-    walls = frozenset({(7, 8), (8, 7), (6, 8)})  # cap = 3
-    assert len(walls) == CATCHER_WALL_CAP
-    state = with_overrides(reset(), catcher_walls=walls, current_agent="catcher")
-    mask = legal_action_mask(state)
-    assert not mask[ACTION_PLACE_WALL_N]
-    assert not mask[ACTION_PLACE_WALL_W]
 
 
 def test_cannot_place_wall_on_opponent():
@@ -169,22 +267,15 @@ def test_cannot_place_wall_on_opponent():
 
 
 def test_cannot_place_wall_off_board():
-    state = reset()  # runner at (0, 0)
+    state = reset()
     with pytest.raises(ValueError):
         step(state, ACTION_PLACE_WALL_N)
 
 
 def test_cannot_place_wall_on_existing_wall():
-    state = with_overrides(reset(), catcher_walls=frozenset({(1, 0)}))
+    state = with_overrides(reset(), walls=_walls((1, 0)))
     with pytest.raises(ValueError):
         step(state, ACTION_PLACE_WALL_E)
-
-
-def test_cannot_remove_opponents_wall():
-    state = with_overrides(reset(), catcher_walls=frozenset({(1, 0)}))
-    # Runner is at (0, 0). The wall at (1, 0) is the catcher's.
-    with pytest.raises(ValueError):
-        step(state, ACTION_REMOVE_WALL_E)
 
 
 def test_cannot_remove_nonexistent_wall():
@@ -196,27 +287,36 @@ def test_cannot_remove_nonexistent_wall():
 # --- Sprint -------------------------------------------------------------
 
 
-def test_runner_sprint_two_cells():
+def test_runner_sprint_two_cells_cardinal():
     state = reset()
     new_state, *_ = step(state, ACTION_SPECIAL_E)
     assert new_state.runner_pos == (2, 0)
     assert new_state.sprint_charges == SPRINT_CHARGES - 1
 
 
+def test_runner_cannot_sprint_diagonally():
+    state = with_overrides(reset(), runner_pos=(3, 3))
+    mask = legal_action_mask(state)
+    for action in (ACTION_SPECIAL_NE, ACTION_SPECIAL_SE, ACTION_SPECIAL_SW, ACTION_SPECIAL_NW):
+        assert not mask[action]
+    with pytest.raises(ValueError):
+        step(state, ACTION_SPECIAL_NE)
+
+
 def test_sprint_blocked_by_intermediate_wall():
-    state = with_overrides(reset(), catcher_walls=frozenset({(1, 0)}))
+    state = with_overrides(reset(), walls=_walls((1, 0)))
     with pytest.raises(ValueError):
         step(state, ACTION_SPECIAL_E)
 
 
 def test_sprint_blocked_by_destination_wall():
-    state = with_overrides(reset(), catcher_walls=frozenset({(2, 0)}))
+    state = with_overrides(reset(), walls=_walls((2, 0)))
     with pytest.raises(ValueError):
         step(state, ACTION_SPECIAL_E)
 
 
 def test_sprint_off_board():
-    state = with_overrides(reset(), runner_pos=(7, 0))  # sprint E goes to (9, 0)
+    state = with_overrides(reset(), runner_pos=(4, 0))
     mask = legal_action_mask(state)
     assert not mask[ACTION_SPECIAL_E]
 
@@ -232,86 +332,211 @@ def test_sprint_cannot_pass_through_or_land_on_catcher():
     state = with_overrides(
         reset(),
         runner_pos=(3, 3),
-        catcher_pos=(4, 3),  # immediately east — sprint E would pass through
+        catcher_pos=(4, 3),
     )
     with pytest.raises(ValueError):
         step(state, ACTION_SPECIAL_E)
 
-    state2 = with_overrides(state, catcher_pos=(5, 3))  # land on
+    state2 = with_overrides(state, catcher_pos=(5, 3))
     with pytest.raises(ValueError):
         step(state2, ACTION_SPECIAL_E)
 
 
-# --- Vault --------------------------------------------------------------
+# --- Shoot / projectiles ------------------------------------------------
 
 
-def test_catcher_vaults_over_wall():
+def test_shoot_creates_projectile_cardinal():
+    state = with_overrides(
+        reset(),
+        runner_pos=(0, 0),
+        catcher_pos=(5, 5),
+        current_agent="catcher",
+    )
+    new_state, *_ = step(state, ACTION_SPECIAL_N)
+    assert new_state.catcher_pos == (5, 5)
+    positions = {p for (p, _) in new_state.projectiles}
+    assert positions == {(5, 4)}
+
+
+def test_shoot_creates_projectile_diagonal():
+    state = with_overrides(
+        reset(),
+        runner_pos=(0, 0),
+        catcher_pos=(5, 5),
+        current_agent="catcher",
+    )
+    # Fire NW: bullet spawns at (5, 5), ticks to (4, 4).
+    new_state, *_ = step(state, ACTION_SPECIAL_NW)
+    positions_and_dirs = set(new_state.projectiles)
+    assert positions_and_dirs == {((4, 4), (-1, -1))}
+
+
+def test_diagonal_projectile_continues_diagonally():
+    state = with_overrides(
+        reset(),
+        runner_pos=(0, 5),
+        catcher_pos=(5, 5),
+        current_agent="catcher",
+    )
+    # Fire NW: bullet at (4, 4) after fire.
+    state, *_ = step(state, ACTION_SPECIAL_NW)
+    state, *_ = step(state, ACTION_WAIT)  # runner waits → bullet ticks to (3, 3)
+    positions = {p for (p, _) in state.projectiles}
+    assert positions == {(3, 3)}
+    state, *_ = step(state, ACTION_WAIT)  # catcher waits → bullet ticks to (2, 2)
+    positions = {p for (p, _) in state.projectiles}
+    assert positions == {(2, 2)}
+
+
+def test_shoot_off_board_only_direction_is_illegal():
+    state = with_overrides(
+        reset(),
+        runner_pos=(0, 5),
+        catcher_pos=(5, 0),  # north and east off-board; NE off-board too
+        current_agent="catcher",
+    )
+    mask = legal_action_mask(state)
+    assert not mask[ACTION_SPECIAL_N]
+    assert not mask[ACTION_SPECIAL_E]
+    assert not mask[ACTION_SPECIAL_NE]
+    assert mask[ACTION_SPECIAL_S]
+    assert mask[ACTION_SPECIAL_W]
+    assert mask[ACTION_SPECIAL_SW]
+
+
+def test_shoot_unlimited():
+    state = with_overrides(reset(), current_agent="catcher")
+    state, *_ = step(state, ACTION_SPECIAL_N)
+    state, *_ = step(state, ACTION_WAIT)
+    state, *_ = step(state, ACTION_SPECIAL_NW)
+    state, *_ = step(state, ACTION_WAIT)
+    state, *_ = step(state, ACTION_SPECIAL_W)
+    assert len(state.projectiles) >= 1
+
+
+def test_projectile_advances_on_runner_turn():
+    state = with_overrides(
+        reset(),
+        runner_pos=(0, 5),
+        catcher_pos=(5, 5),
+        current_agent="catcher",
+    )
+    state, *_ = step(state, ACTION_SPECIAL_N)
+    positions_after_fire = {p for (p, _) in state.projectiles}
+    assert positions_after_fire == {(5, 4)}
+    state, *_ = step(state, ACTION_WAIT)
+    positions_after_runner = {p for (p, _) in state.projectiles}
+    assert positions_after_runner == {(5, 3)}
+
+
+def test_projectile_offboard_removal():
+    state = with_overrides(
+        reset(),
+        runner_pos=(0, 5),
+        catcher_pos=(5, 0),
+        current_agent="catcher",
+    )
+    state, *_ = step(state, ACTION_SPECIAL_W)
+    for _ in range(2 * BOARD_SIZE):
+        if not state.projectiles:
+            break
+        state, *_ = step(state, ACTION_WAIT)
+    assert state.projectiles == frozenset()
+    assert not state.terminated
+
+
+def test_diagonal_projectile_offboard_removal():
+    # Catcher at (3, 3) firing SE: bullet steps (4,4) → (5,5) → off-board.
     state = with_overrides(
         reset(),
         runner_pos=(0, 0),
         catcher_pos=(3, 3),
-        catcher_walls=frozenset({(4, 3)}),
         current_agent="catcher",
     )
-    new_state, *_ = step(state, ACTION_SPECIAL_E)
-    assert new_state.catcher_pos == (5, 3)
-    assert new_state.vault_charges == VAULT_CHARGES - 1
-    assert (4, 3) in new_state.catcher_walls  # the wall remains
+    state, *_ = step(state, ACTION_SPECIAL_SE)
+    for _ in range(2 * BOARD_SIZE):
+        if not state.projectiles:
+            break
+        state, *_ = step(state, ACTION_WAIT)
+    assert state.projectiles == frozenset()
+    assert not state.terminated
 
 
-def test_vault_requires_adjacent_wall():
-    state = with_overrides(reset(), current_agent="catcher")  # no walls
-    mask = legal_action_mask(state)
-    for a in (ACTION_SPECIAL_N, ACTION_SPECIAL_E, ACTION_SPECIAL_S, ACTION_SPECIAL_W):
-        assert not mask[a]
-
-
-def test_vault_destination_cannot_be_wall():
+def test_projectile_and_wall_mutual_destruction():
     state = with_overrides(
         reset(),
-        catcher_pos=(3, 3),
-        catcher_walls=frozenset({(4, 3), (5, 3)}),  # wall at dest
+        runner_pos=(0, 5),
+        catcher_pos=(5, 5),
+        walls=_walls((5, 3)),
         current_agent="catcher",
     )
-    with pytest.raises(ValueError):
-        step(state, ACTION_SPECIAL_E)
+    state, *_ = step(state, ACTION_SPECIAL_N)  # bullet at (5, 4)
+    assert state.projectiles
+    assert (5, 3) in state.walls
+    state, *_ = step(state, ACTION_WAIT)  # bullet ticks into (5, 3)
+    assert state.projectiles == frozenset()
+    assert (5, 3) not in state.walls
 
 
-def test_vault_onto_runner_captures():
+def test_diagonal_projectile_destroys_wall():
+    state = with_overrides(
+        reset(),
+        runner_pos=(0, 5),
+        catcher_pos=(5, 5),
+        walls=_walls((3, 3)),
+        current_agent="catcher",
+    )
+    # Fire NW: spawn at (5,5), tick to (4,4).
+    state, *_ = step(state, ACTION_SPECIAL_NW)
+    assert {p for (p, _) in state.projectiles} == {(4, 4)}
+    assert (3, 3) in state.walls
+    state, *_ = step(state, ACTION_WAIT)  # bullet ticks to (3, 3) → destroys wall
+    assert state.projectiles == frozenset()
+    assert (3, 3) not in state.walls
+
+
+def test_projectile_hits_runner_catcher_wins():
     state = with_overrides(
         reset(),
         runner_pos=(5, 3),
-        catcher_pos=(3, 3),
-        runner_walls=frozenset({(4, 3)}),  # runner placed it; catcher still vaults
+        catcher_pos=(5, 5),
         current_agent="catcher",
     )
-    new_state, r_runner, r_catcher, terminated, _, _ = step(state, ACTION_SPECIAL_E)
+    state, *_, terminated, _, _ = step(state, ACTION_SPECIAL_N)
+    assert not terminated
+    new_state, r_runner, r_catcher, terminated, _, _ = step(state, ACTION_WAIT)
     assert terminated
     assert new_state.winner == "catcher"
-    assert r_catcher == 1.0 and r_runner == -1.0
+    assert r_runner == -1.0 and r_catcher == 1.0
 
 
-def test_vault_requires_charge():
+def test_diagonal_projectile_hits_runner():
     state = with_overrides(
         reset(),
-        catcher_pos=(3, 3),
-        catcher_walls=frozenset({(4, 3)}),
-        vault_charges=0,
+        runner_pos=(2, 2),
+        catcher_pos=(5, 5),
         current_agent="catcher",
     )
-    mask = legal_action_mask(state)
-    assert not mask[ACTION_SPECIAL_E]
+    # Fire NW: bullet ticks (5,5) → (4,4) → (3,3) → (2,2).
+    state, *_ = step(state, ACTION_SPECIAL_NW)
+    assert not state.terminated
+    state, *_ = step(state, ACTION_WAIT)  # → (3, 3)
+    assert not state.terminated
+    new_state, *_, terminated, _, _ = step(state, ACTION_WAIT)  # → (2, 2) hits runner
+    assert terminated
+    assert new_state.winner == "catcher"
 
 
-def test_vault_off_board():
+def test_projectile_hits_runner_immediately_on_fire():
     state = with_overrides(
         reset(),
-        catcher_pos=(BOARD_SIZE - 2, 3),
-        catcher_walls=frozenset({(BOARD_SIZE - 1, 3)}),
+        runner_pos=(5, 4),
+        catcher_pos=(5, 5),
         current_agent="catcher",
     )
-    with pytest.raises(ValueError):
-        step(state, ACTION_SPECIAL_E)
+    new_state, *_, terminated, _, _ = step(state, ACTION_SPECIAL_N)
+    assert terminated
+    assert new_state.winner == "catcher"
 
 
 # --- Wait & turn flow ---------------------------------------------------
@@ -340,7 +565,6 @@ def test_turn_alternation():
 
 def test_runner_wins_on_timeout():
     state = reset()
-    # 30 waits brings turn from 0 to 30. Mask any failure modes by waiting.
     for _ in range(TURN_LIMIT - 1):
         state, *_ = step(state, ACTION_WAIT)
         assert not state.terminated
@@ -372,23 +596,32 @@ def _representative_states() -> list[GameState]:
     s2 = with_overrides(
         reset(),
         runner_pos=(2, 2),
-        runner_walls=frozenset({(2, 1), (3, 2), (1, 2)}),
+        walls=_walls((2, 1), (3, 2), (1, 2)),
         sprint_charges=1,
     )
     s3 = with_overrides(
         reset(),
         runner_pos=(0, 0),
         catcher_pos=(3, 3),
-        catcher_walls=frozenset({(4, 3), (3, 4)}),
+        walls=_walls((4, 3), (3, 4)),
         current_agent="catcher",
     )
     s4 = with_overrides(
         reset(),
-        runner_walls=frozenset({(2, 0), (3, 0), (4, 0), (5, 0)}),  # cap reached
+        walls=_walls((2, 0), (3, 0), (4, 0), (5, 0)),
     )
     s5 = with_overrides(reset(), sprint_charges=0)
-    s6 = with_overrides(reset(), current_agent="catcher", vault_charges=0)
-    return [s0, s1, s2, s3, s4, s5, s6]
+    s6 = with_overrides(
+        reset(),
+        current_agent="catcher",
+        catcher_pos=(5, 0),
+    )
+    s7 = with_overrides(
+        reset(),
+        current_agent="catcher",
+        projectiles=frozenset({((3, 3), (0, -1))}),
+    )
+    return [s0, s1, s2, s3, s4, s5, s6, s7]
 
 
 @pytest.mark.parametrize("state", _representative_states())
@@ -396,7 +629,6 @@ def test_mask_matches_step_outcome(state: GameState):
     mask = legal_action_mask(state)
     for a in range(ACTION_SPACE_SIZE):
         if mask[a]:
-            # Step must succeed.
             step(state, a)
         else:
             with pytest.raises(ValueError):
@@ -408,7 +640,7 @@ def test_mask_matches_step_outcome(state: GameState):
 
 def test_step_does_not_mutate_input():
     state = reset()
-    snapshot = with_overrides(state)  # copy via dataclass replace; same fields
+    snapshot = with_overrides(state)
     step(state, ACTION_MOVE_E)
     assert state == snapshot
 
@@ -436,6 +668,7 @@ def test_observation_shape_and_dtype():
     obs = encode_observation(state, "runner")
     assert obs.shape == (OBS_CHANNELS, BOARD_SIZE, BOARD_SIZE)
     assert obs.dtype == np.float32
+    assert OBS_CHANNELS == 7
 
 
 def test_observation_invalid_perspective_rejected():
@@ -448,26 +681,20 @@ def test_observation_perspective_swaps_own_and_opponent():
     state = with_overrides(
         reset(),
         runner_pos=(2, 3),
-        catcher_pos=(7, 1),
-        runner_walls=frozenset({(2, 4)}),
-        catcher_walls=frozenset({(6, 1)}),
+        catcher_pos=(5, 1),
+        walls=_walls((2, 4), (4, 1)),
         sprint_charges=2,
-        vault_charges=1,
     )
     runner_obs = encode_observation(state, "runner")
     catcher_obs = encode_observation(state, "catcher")
 
-    # Position channels are swapped between perspectives.
     np.testing.assert_array_equal(runner_obs[0], catcher_obs[1])
     np.testing.assert_array_equal(runner_obs[1], catcher_obs[0])
-    # Wall channels swapped too.
-    np.testing.assert_array_equal(runner_obs[2], catcher_obs[3])
-    np.testing.assert_array_equal(runner_obs[3], catcher_obs[2])
-    # Charge channels swapped.
-    assert runner_obs[4, 0, 0] == pytest.approx(2 / SPRINT_CHARGES)
-    assert catcher_obs[4, 0, 0] == pytest.approx(1 / VAULT_CHARGES)
-    # Turn channel is shared.
-    np.testing.assert_array_equal(runner_obs[6], catcher_obs[6])
+    np.testing.assert_array_equal(runner_obs[2], catcher_obs[2])  # walls shared
+    # Charge channel: runner has sprint, catcher has none.
+    assert runner_obs[3, 0, 0] == pytest.approx(2 / SPRINT_CHARGES)
+    assert catcher_obs[3, 0, 0] == pytest.approx(0.0)
+    np.testing.assert_array_equal(runner_obs[5], catcher_obs[5])  # turn shared
 
 
 def test_observation_position_channels_are_one_hot():
@@ -479,3 +706,14 @@ def test_observation_position_channels_are_one_hot():
     assert obs[0, ry, rx] == 1.0
     cx, cy = state.catcher_pos
     assert obs[1, cy, cx] == 1.0
+
+
+def test_observation_projectile_channel():
+    state = with_overrides(
+        reset(),
+        projectiles=frozenset({((3, 4), (0, -1)), ((1, 2), (1, 1))}),
+    )
+    obs = encode_observation(state, "runner")
+    assert obs[6, 4, 3] == 1.0
+    assert obs[6, 2, 1] == 1.0
+    assert obs[6].sum() == 2.0

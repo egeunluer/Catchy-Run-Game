@@ -5,8 +5,10 @@ These are used by:
 * the balance harness, to estimate win-rate parity between the two kits.
 
 The policy is intentionally shallow: enumerate legal actions, score each by
-Manhattan distance to the opponent after applying the action (with terminal
-states overriding the score), and pick the best with random tie-break.
+Chebyshev (king-move) distance to the opponent after applying the action,
+with terminal states overriding the score. The runner additionally subtracts
+a danger term equal to its proximity to the nearest projectile, so it
+prefers staying away from bullets.
 
 This is too weak to find subtle imbalances, but it stress-tests the engine
 and gives a baseline non-trivial opponent.
@@ -22,8 +24,8 @@ from ..actions import ACTION_SPACE_SIZE
 from ..engine import Agent, GameState, legal_action_mask, step
 
 
-def _manhattan(p1: tuple[int, int], p2: tuple[int, int]) -> int:
-    return abs(p1[0] - p2[0]) + abs(p1[1] - p2[1])
+def _chebyshev(p1: tuple[int, int], p2: tuple[int, int]) -> int:
+    return max(abs(p1[0] - p2[0]), abs(p1[1] - p2[1]))
 
 
 def _score(state: GameState, action: int, role: Agent) -> float:
@@ -33,8 +35,16 @@ def _score(state: GameState, action: int, role: Agent) -> float:
         if new_state.winner == role:
             return math.inf
         return -math.inf
-    distance = _manhattan(new_state.runner_pos, new_state.catcher_pos)
-    return distance if role == "runner" else -distance
+    distance = _chebyshev(new_state.runner_pos, new_state.catcher_pos)
+    base = distance if role == "runner" else -distance
+    if role == "runner" and new_state.projectiles:
+        nearest = min(
+            _chebyshev(new_state.runner_pos, pos) for (pos, _) in new_state.projectiles
+        )
+        # Prefer cells farther from any bullet. Weight kept small so the
+        # runner still primarily flees the catcher.
+        base += 0.5 * nearest
+    return base
 
 
 def _choose(state: GameState, role: Agent, rng: random.Random) -> int:

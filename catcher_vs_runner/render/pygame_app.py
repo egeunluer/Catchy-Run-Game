@@ -21,23 +21,12 @@ import pygame
 
 from .. import engine
 from ..actions import (
-    ACTION_MOVE_E,
-    ACTION_MOVE_N,
-    ACTION_MOVE_S,
-    ACTION_MOVE_W,
-    ACTION_PLACE_WALL_E,
-    ACTION_PLACE_WALL_N,
-    ACTION_PLACE_WALL_S,
-    ACTION_PLACE_WALL_W,
-    ACTION_REMOVE_WALL_E,
-    ACTION_REMOVE_WALL_N,
-    ACTION_REMOVE_WALL_S,
-    ACTION_REMOVE_WALL_W,
-    ACTION_SPECIAL_E,
-    ACTION_SPECIAL_N,
-    ACTION_SPECIAL_S,
-    ACTION_SPECIAL_W,
     ACTION_WAIT,
+    DIRECTIONS_8,
+    MOVE_ACTIONS,
+    PLACE_WALL_ACTIONS,
+    REMOVE_WALL_ACTIONS,
+    SPECIAL_ACTIONS,
 )
 from ..agents.heuristic import catcher_policy, runner_policy
 
@@ -49,9 +38,36 @@ GRID_PIXELS = engine.BOARD_SIZE * CELL
 SIDEBAR_X = GRID_ORIGIN[0] + GRID_PIXELS + 24
 SIDEBAR_W = 320
 WINDOW_W = SIDEBAR_X + SIDEBAR_W + 24
-WINDOW_H = GRID_ORIGIN[1] + GRID_PIXELS + 24
 FPS = 60
 AI_DELAY_MS = 350
+
+BTN_H = 32
+BTN_STEP = 38
+NEW_GAME_H = 38
+DIV_COLOR = (52, 56, 70)
+
+Y_TITLE = 24
+Y_STATUS = 62
+Y_STATS_R = 90
+Y_STATS_C = 108
+Y_SPECIAL = 130
+Y_DIV1 = 156
+Y_HDR_ACT = 168
+Y_BTN_MOVE = 198
+Y_BTN_PLACE = Y_BTN_MOVE + BTN_STEP
+Y_BTN_REMOVE = Y_BTN_PLACE + BTN_STEP
+Y_BTN_SPECIAL = Y_BTN_REMOVE + BTN_STEP
+Y_BTN_WAIT = Y_BTN_SPECIAL + BTN_STEP + 12
+Y_DIV2 = Y_BTN_WAIT + BTN_H + 14
+Y_HDR_GAME = Y_DIV2 + 12
+Y_BTN_GM_1 = Y_HDR_GAME + 28
+Y_BTN_GM_2 = Y_BTN_GM_1 + BTN_STEP
+Y_BTN_GM_3 = Y_BTN_GM_2 + BTN_STEP
+Y_BTN_NEW = Y_BTN_GM_3 + BTN_STEP + 14
+Y_FOOTER = Y_BTN_NEW + NEW_GAME_H + 16
+
+SIDEBAR_BOTTOM = Y_FOOTER + 28
+WINDOW_H = max(GRID_ORIGIN[1] + GRID_PIXELS + 24, SIDEBAR_BOTTOM)
 
 # --- Colors --------------------------------------------------------------
 
@@ -61,8 +77,8 @@ C_CELL = (40, 44, 56)
 C_CELL_HL = (74, 96, 130)
 C_RUNNER = (90, 168, 230)
 C_CATCHER = (220, 96, 96)
-C_RUNNER_WALL = (62, 110, 158)
-C_CATCHER_WALL = (158, 70, 70)
+C_WALL = (62, 110, 158)  # walls are runner-only now
+C_PROJECTILE = (240, 210, 90)
 C_TEXT = (228, 230, 240)
 C_TEXT_DIM = (140, 144, 160)
 C_BTN = (52, 58, 76)
@@ -80,66 +96,58 @@ MODE_SPECIAL = "SPECIAL"
 ACTION_MODES = [MODE_MOVE, MODE_PLACE, MODE_REMOVE, MODE_SPECIAL]
 
 GM_HVH = "HVH"
-GM_AI_RUNNER = "AI_RUNNER"   # AI plays runner, human catcher
-GM_AI_CATCHER = "AI_CATCHER"  # AI plays catcher, human runner
+GM_AI_RUNNER = "AI_RUNNER"
+GM_AI_CATCHER = "AI_CATCHER"
 
 
 @dataclass
 class Button:
     rect: pygame.Rect
     label: str
-    key: str  # arbitrary identifier the click handler dispatches on
+    key: str
 
 
 # --- Action mapping ------------------------------------------------------
 
-_DIR_TO_INDEX = {(0, -1): 0, (1, 0): 1, (0, 1): 2, (-1, 0): 3}
-
-_MOVE_BY_INDEX = (ACTION_MOVE_N, ACTION_MOVE_E, ACTION_MOVE_S, ACTION_MOVE_W)
-_PLACE_BY_INDEX = (
-    ACTION_PLACE_WALL_N, ACTION_PLACE_WALL_E,
-    ACTION_PLACE_WALL_S, ACTION_PLACE_WALL_W,
-)
-_REMOVE_BY_INDEX = (
-    ACTION_REMOVE_WALL_N, ACTION_REMOVE_WALL_E,
-    ACTION_REMOVE_WALL_S, ACTION_REMOVE_WALL_W,
-)
-_SPECIAL_BY_INDEX = (
-    ACTION_SPECIAL_N, ACTION_SPECIAL_E,
-    ACTION_SPECIAL_S, ACTION_SPECIAL_W,
-)
+# Direction (dx, dy) -> 8-direction index (matches DIRECTIONS_8 ordering).
+_DIR_TO_IDX_8: dict[tuple[int, int], int] = {d: i for i, d in enumerate(DIRECTIONS_8)}
 
 
 def _cell_to_action(state: engine.GameState, mode: str, cell: tuple[int, int]) -> Optional[int]:
     """Translate a clicked cell + selected action mode to an action index.
 
     Returns None if the click does not correspond to a valid direction for
-    the selected mode (e.g., diagonal click, or 2-step click in MOVE mode).
-    Does not check legality — that is left to `engine.step`.
+    the selected mode. Does not check legality — that is left to `engine.step`.
     """
     actor_pos = state.own_position()
     dx = cell[0] - actor_pos[0]
     dy = cell[1] - actor_pos[1]
 
     if mode == MODE_SPECIAL:
-        if dx == 0 and dy in (-2, 2):
-            unit = (0, dy // 2)
-        elif dy == 0 and dx in (-2, 2):
-            unit = (dx // 2, 0)
-        else:
-            return None
-        return _SPECIAL_BY_INDEX[_DIR_TO_INDEX[unit]]
-
-    if abs(dx) + abs(dy) != 1:
+        if state.current_agent == "runner":
+            # Sprint: 2-cell cardinal jump only.
+            if dx == 0 and dy in (-3, 3):
+                unit = (0, dy // 3)
+            elif dy == 0 and dx in (-3, 3):
+                unit = (dx // 3, 0)
+            else:
+                return None
+            return SPECIAL_ACTIONS[_DIR_TO_IDX_8[unit]]
+        # Catcher shoot: any 1-cell direction (including diagonals).
+        if (dx, dy) in _DIR_TO_IDX_8:
+            return SPECIAL_ACTIONS[_DIR_TO_IDX_8[(dx, dy)]]
         return None
-    unit = (dx, dy)
-    idx = _DIR_TO_INDEX[unit]
+
+    # Move / place / remove: any 1-cell direction.
+    if (dx, dy) not in _DIR_TO_IDX_8:
+        return None
+    idx = _DIR_TO_IDX_8[(dx, dy)]
     if mode == MODE_MOVE:
-        return _MOVE_BY_INDEX[idx]
+        return MOVE_ACTIONS[idx]
     if mode == MODE_PLACE:
-        return _PLACE_BY_INDEX[idx]
+        return PLACE_WALL_ACTIONS[idx]
     if mode == MODE_REMOVE:
-        return _REMOVE_BY_INDEX[idx]
+        return REMOVE_WALL_ACTIONS[idx]
     return None
 
 
@@ -151,30 +159,26 @@ def _legal_target_cells(state: engine.GameState, mode: str) -> set[tuple[int, in
     mask = engine.legal_action_mask(state)
     cells: set[tuple[int, int]] = set()
 
-    def add(action: int, dx: int, dy: int, distance: int = 1) -> None:
-        if mask[action]:
-            cells.add((actor[0] + dx * distance, actor[1] + dy * distance))
+    def add_8(actions: tuple[int, ...], distance: int = 1) -> None:
+        for action, (dx, dy) in zip(actions, DIRECTIONS_8):
+            if mask[action]:
+                cells.add((actor[0] + dx * distance, actor[1] + dy * distance))
 
     if mode == MODE_MOVE:
-        add(ACTION_MOVE_N, 0, -1)
-        add(ACTION_MOVE_E, 1, 0)
-        add(ACTION_MOVE_S, 0, 1)
-        add(ACTION_MOVE_W, -1, 0)
+        add_8(MOVE_ACTIONS)
     elif mode == MODE_PLACE:
-        add(ACTION_PLACE_WALL_N, 0, -1)
-        add(ACTION_PLACE_WALL_E, 1, 0)
-        add(ACTION_PLACE_WALL_S, 0, 1)
-        add(ACTION_PLACE_WALL_W, -1, 0)
+        add_8(PLACE_WALL_ACTIONS)
     elif mode == MODE_REMOVE:
-        add(ACTION_REMOVE_WALL_N, 0, -1)
-        add(ACTION_REMOVE_WALL_E, 1, 0)
-        add(ACTION_REMOVE_WALL_S, 0, 1)
-        add(ACTION_REMOVE_WALL_W, -1, 0)
+        add_8(REMOVE_WALL_ACTIONS)
     elif mode == MODE_SPECIAL:
-        add(ACTION_SPECIAL_N, 0, -1, distance=2)
-        add(ACTION_SPECIAL_E, 1, 0, distance=2)
-        add(ACTION_SPECIAL_S, 0, 1, distance=2)
-        add(ACTION_SPECIAL_W, -1, 0, distance=2)
+        if state.current_agent == "runner":
+            # Sprint: cardinal-only at distance 2; diagonals are illegal so
+            # the legality mask filters them out automatically.
+            add_8(SPECIAL_ACTIONS, distance=3)
+        else:
+            # Catcher shoot: highlight where the bullet lands after the
+            # post-fire tick (catcher_pos + dir).
+            add_8(SPECIAL_ACTIONS)
     return cells
 
 
@@ -195,43 +199,34 @@ class App:
         self.mode: str = MODE_MOVE
         self.game_mode: str = GM_HVH
         self.rng = random.Random()
-        self.ai_pending_at: Optional[int] = None  # pygame ticks
+        self.ai_pending_at: Optional[int] = None
 
         self.buttons: list[Button] = self._build_buttons()
 
-    # -- Layout -------------------------------------------------------
-
     def _build_buttons(self) -> list[Button]:
         buttons: list[Button] = []
-        y = 110
-        for mode in ACTION_MODES:
+        action_ys = [Y_BTN_MOVE, Y_BTN_PLACE, Y_BTN_REMOVE, Y_BTN_SPECIAL]
+        for mode, y in zip(ACTION_MODES, action_ys):
             buttons.append(Button(
-                pygame.Rect(SIDEBAR_X, y, SIDEBAR_W, 36), mode.title(),
+                pygame.Rect(SIDEBAR_X, y, SIDEBAR_W, BTN_H), mode.title(),
                 f"mode:{mode}",
             ))
-            y += 42
-        # Wait button (special — not a mode, just a one-shot action).
         buttons.append(Button(
-            pygame.Rect(SIDEBAR_X, y, SIDEBAR_W, 36), "Wait", "wait",
+            pygame.Rect(SIDEBAR_X, Y_BTN_WAIT, SIDEBAR_W, BTN_H), "Wait", "wait",
         ))
-        y += 56
-        # Game-mode buttons
-        for label, key in [
-            ("Human vs. Human", f"gm:{GM_HVH}"),
-            ("Human catcher (AI runner)", f"gm:{GM_AI_RUNNER}"),
-            ("Human runner (AI catcher)", f"gm:{GM_AI_CATCHER}"),
-        ]:
+        gm_entries = [
+            (Y_BTN_GM_1, "Human vs. Human", f"gm:{GM_HVH}"),
+            (Y_BTN_GM_2, "Human catcher (AI runner)", f"gm:{GM_AI_RUNNER}"),
+            (Y_BTN_GM_3, "Human runner (AI catcher)", f"gm:{GM_AI_CATCHER}"),
+        ]
+        for y, label, key in gm_entries:
             buttons.append(Button(
-                pygame.Rect(SIDEBAR_X, y, SIDEBAR_W, 32), label, key,
+                pygame.Rect(SIDEBAR_X, y, SIDEBAR_W, BTN_H), label, key,
             ))
-            y += 36
-        y += 12
         buttons.append(Button(
-            pygame.Rect(SIDEBAR_X, y, SIDEBAR_W, 36), "New Game", "new",
+            pygame.Rect(SIDEBAR_X, Y_BTN_NEW, SIDEBAR_W, NEW_GAME_H), "New Game", "new",
         ))
         return buttons
-
-    # -- Cell <-> pixel ----------------------------------------------
 
     def _cell_at(self, mx: int, my: int) -> Optional[tuple[int, int]]:
         gx, gy = GRID_ORIGIN
@@ -242,8 +237,6 @@ class App:
     def _cell_rect(self, cell: tuple[int, int]) -> pygame.Rect:
         gx, gy = GRID_ORIGIN
         return pygame.Rect(gx + cell[0] * CELL, gy + cell[1] * CELL, CELL, CELL)
-
-    # -- Game flow ----------------------------------------------------
 
     def _ai_role(self) -> Optional[str]:
         if self.game_mode == GM_AI_RUNNER:
@@ -259,7 +252,7 @@ class App:
         try:
             new_state, *_ = engine.step(self.state, action)
         except ValueError:
-            return  # silently ignore illegal click
+            return
         self.state = new_state
         if self._is_ai_turn():
             self.ai_pending_at = pygame.time.get_ticks() + AI_DELAY_MS
@@ -285,8 +278,6 @@ class App:
         self.state = engine.reset()
         self.mode = MODE_MOVE
         self.ai_pending_at = pygame.time.get_ticks() + AI_DELAY_MS if self._is_ai_turn() else None
-
-    # -- Event handlers -----------------------------------------------
 
     def _on_button(self, key: str) -> None:
         if key == "wait":
@@ -338,8 +329,6 @@ class App:
                     self._apply_action(ACTION_WAIT)
         return True
 
-    # -- Drawing ------------------------------------------------------
-
     def _draw_grid(self) -> None:
         gx, gy = GRID_ORIGIN
         for cy in range(engine.BOARD_SIZE):
@@ -348,7 +337,6 @@ class App:
                 pygame.draw.rect(self.screen, C_CELL, rect)
                 pygame.draw.rect(self.screen, C_GRID, rect, 1)
 
-        # Highlight legal target cells for the selected mode.
         if not self.state.terminated and not self._is_ai_turn():
             targets = _legal_target_cells(self.state, self.mode)
             for cell in targets:
@@ -356,19 +344,26 @@ class App:
                 pygame.draw.rect(self.screen, C_CELL_HL, rect)
                 pygame.draw.rect(self.screen, C_GRID, rect, 1)
 
-        # Walls
-        for x, y in self.state.runner_walls:
-            self._draw_wall((x, y), C_RUNNER_WALL)
-        for x, y in self.state.catcher_walls:
-            self._draw_wall((x, y), C_CATCHER_WALL)
+        for (x, y), expiry in self.state.walls:
+            remaining = expiry - self.state.turn + 1
+            self._draw_wall((x, y), C_WALL, remaining)
 
-        # Agents
         self._draw_agent(self.state.runner_pos, C_RUNNER, "R")
         self._draw_agent(self.state.catcher_pos, C_CATCHER, "C")
 
-    def _draw_wall(self, cell: tuple[int, int], color: tuple[int, int, int]) -> None:
+        self._draw_projectiles()
+
+    def _draw_wall(
+        self,
+        cell: tuple[int, int],
+        color: tuple[int, int, int],
+        remaining: Optional[int] = None,
+    ) -> None:
         rect = self._cell_rect(cell).inflate(-8, -8)
         pygame.draw.rect(self.screen, color, rect, border_radius=4)
+        if remaining is not None and remaining > 0:
+            text = self.font_sm.render(str(remaining), True, C_TEXT)
+            self.screen.blit(text, text.get_rect(center=rect.center))
 
     def _draw_agent(self, cell: tuple[int, int], color: tuple[int, int, int], label: str) -> None:
         rect = self._cell_rect(cell)
@@ -377,14 +372,26 @@ class App:
         text = self.font_lg.render(label, True, (255, 255, 255))
         self.screen.blit(text, text.get_rect(center=center))
 
+    def _draw_projectiles(self) -> None:
+        per_cell: dict[tuple[int, int], int] = {}
+        for (pos, _) in self.state.projectiles:
+            per_cell[pos] = per_cell.get(pos, 0) + 1
+        radius = max(4, CELL // 7)
+        for cell, count in per_cell.items():
+            rect = self._cell_rect(cell)
+            cx, cy = rect.center
+            offsets = [(0, 0)] if count == 1 else [
+                (-radius, -radius), (radius, -radius),
+                (-radius, radius), (radius, radius),
+            ][:count]
+            for ox, oy in offsets:
+                pygame.draw.circle(self.screen, C_PROJECTILE, (cx + ox, cy + oy), radius)
+
     def _draw_sidebar(self) -> None:
         x = SIDEBAR_X
-        y = 24
-        title = self.font_lg.render("Catcher vs. Runner", True, C_TEXT)
-        self.screen.blit(title, (x, y))
-        y += 32
 
-        # Status line
+        self.screen.blit(self.font_lg.render("Catcher vs. Runner", True, C_TEXT), (x, Y_TITLE))
+
         if self.state.terminated:
             winner = self.state.winner or "?"
             status = f"Game over — {winner} wins"
@@ -394,36 +401,41 @@ class App:
             color = C_RUNNER if mover == "runner" else C_CATCHER
             ai_tag = " (AI)" if self._ai_role() == mover else ""
             status = f"Turn {self.state.turn}/{engine.TURN_LIMIT} — {mover}{ai_tag}'s move"
-        self.screen.blit(self.font.render(status, True, color), (x, y))
-        y += 24
+        self.screen.blit(self.font.render(status, True, color), (x, Y_STATUS))
 
-        # Stats
-        r_walls = len(self.state.runner_walls)
-        c_walls = len(self.state.catcher_walls)
-        lines = [
-            f"Runner @ {self.state.runner_pos}  walls {r_walls}/{engine.RUNNER_WALL_CAP}  sprint {self.state.sprint_charges}/{engine.SPRINT_CHARGES}",
-            f"Catcher @ {self.state.catcher_pos}  walls {c_walls}/{engine.CATCHER_WALL_CAP}  vault {self.state.vault_charges}/{engine.VAULT_CHARGES}",
-        ]
-        for line in lines:
-            self.screen.blit(self.font_sm.render(line, True, C_TEXT_DIM), (x, y))
-            y += 16
+        bullets = len(self.state.projectiles)
+        r_line = (
+            f"Runner @ {self.state.runner_pos}   walls {len(self.state.walls)}/{engine.RUNNER_WALL_CAP}"
+            f"   sprint {self.state.sprint_charges}/{engine.SPRINT_CHARGES}"
+        )
+        c_line = f"Catcher @ {self.state.catcher_pos}   bullets in flight {bullets}"
+        self.screen.blit(self.font_sm.render(r_line, True, C_RUNNER), (x, Y_STATS_R))
+        self.screen.blit(self.font_sm.render(c_line, True, C_CATCHER), (x, Y_STATS_C))
 
-        # Mode-specific helper text
-        special_label = "Sprint (2 cells)" if self.state.current_agent == "runner" else "Vault (over wall)"
-        helper_lines = [
-            "Click a mode, then click a cell.",
-            f"Special action: {special_label}",
-            "Keys: 1-4 modes, Space wait, R new game",
-        ]
-        y += 6
-        for line in helper_lines:
-            self.screen.blit(self.font_sm.render(line, True, C_TEXT_DIM), (x, y))
-            y += 14
+        special_label = (
+            "Sprint (2 cells, cardinal)"
+            if self.state.current_agent == "runner"
+            else "Shoot (8 directions, unlimited)"
+        )
+        self.screen.blit(
+            self.font_sm.render(f"Special: {special_label}", True, C_TEXT_DIM),
+            (x, Y_SPECIAL),
+        )
 
-        # Buttons
+        pygame.draw.line(self.screen, DIV_COLOR, (x, Y_DIV1), (x + SIDEBAR_W, Y_DIV1), 1)
+        self.screen.blit(self.font.render("Action", True, C_TEXT), (x, Y_HDR_ACT))
+
+        pygame.draw.line(self.screen, DIV_COLOR, (x, Y_DIV2), (x + SIDEBAR_W, Y_DIV2), 1)
+        self.screen.blit(self.font.render("Game mode", True, C_TEXT), (x, Y_HDR_GAME))
+
         mouse = pygame.mouse.get_pos()
         for btn in self.buttons:
             self._draw_button(btn, mouse)
+
+        self.screen.blit(
+            self.font_sm.render("Keys: 1-4 modes  ·  Space wait  ·  R new game", True, C_TEXT_DIM),
+            (x, Y_FOOTER),
+        )
 
     def _draw_button(self, btn: Button, mouse: tuple[int, int]) -> None:
         active = (
@@ -453,8 +465,6 @@ class App:
         text = self.font_lg.render(msg, True, C_TEXT)
         rect = text.get_rect(center=(gx + GRID_PIXELS // 2, gy + GRID_PIXELS // 2))
         self.screen.blit(text, rect)
-
-    # -- Main loop ----------------------------------------------------
 
     def run(self) -> None:
         running = True
