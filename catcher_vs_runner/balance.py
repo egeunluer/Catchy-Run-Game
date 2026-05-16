@@ -21,7 +21,7 @@ from .agents.heuristic import catcher_policy, runner_policy
 
 
 def play_one(rng: random.Random) -> str:
-    state = engine.reset()
+    state = engine.reset(seed=rng.randrange(2**31))
     while not state.terminated:
         if state.current_agent == "runner":
             action = runner_policy(state, rng)

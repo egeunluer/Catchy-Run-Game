@@ -21,11 +21,8 @@ import pygame
 
 from .. import engine
 from ..actions import (
-    ACTION_WAIT,
     DIRECTIONS_8,
     MOVE_ACTIONS,
-    PLACE_WALL_ACTIONS,
-    REMOVE_WALL_ACTIONS,
     SPECIAL_ACTIONS,
 )
 from ..agents.heuristic import catcher_policy, runner_policy
@@ -54,11 +51,8 @@ Y_SPECIAL = 130
 Y_DIV1 = 156
 Y_HDR_ACT = 168
 Y_BTN_MOVE = 198
-Y_BTN_PLACE = Y_BTN_MOVE + BTN_STEP
-Y_BTN_REMOVE = Y_BTN_PLACE + BTN_STEP
-Y_BTN_SPECIAL = Y_BTN_REMOVE + BTN_STEP
-Y_BTN_WAIT = Y_BTN_SPECIAL + BTN_STEP + 12
-Y_DIV2 = Y_BTN_WAIT + BTN_H + 14
+Y_BTN_SPECIAL = Y_BTN_MOVE + BTN_STEP
+Y_DIV2 = Y_BTN_SPECIAL + BTN_H + 14
 Y_HDR_GAME = Y_DIV2 + 12
 Y_BTN_GM_1 = Y_HDR_GAME + 28
 Y_BTN_GM_2 = Y_BTN_GM_1 + BTN_STEP
@@ -77,8 +71,9 @@ C_CELL = (40, 44, 56)
 C_CELL_HL = (74, 96, 130)
 C_RUNNER = (90, 168, 230)
 C_CATCHER = (220, 96, 96)
-C_WALL = (62, 110, 158)  # walls are runner-only now
 C_PROJECTILE = (240, 210, 90)
+C_SPECIAL = (200, 180, 60)
+C_SPECIAL_CAPTURED = (110, 180, 110)
 C_TEXT = (228, 230, 240)
 C_TEXT_DIM = (140, 144, 160)
 C_BTN = (52, 58, 76)
@@ -90,10 +85,8 @@ C_BANNER = (32, 36, 48)
 # --- Modes ---------------------------------------------------------------
 
 MODE_MOVE = "MOVE"
-MODE_PLACE = "PLACE"
-MODE_REMOVE = "REMOVE"
 MODE_SPECIAL = "SPECIAL"
-ACTION_MODES = [MODE_MOVE, MODE_PLACE, MODE_REMOVE, MODE_SPECIAL]
+ACTION_MODES = [MODE_MOVE, MODE_SPECIAL]
 
 GM_HVH = "HVH"
 GM_AI_RUNNER = "AI_RUNNER"
@@ -125,7 +118,7 @@ def _cell_to_action(state: engine.GameState, mode: str, cell: tuple[int, int]) -
 
     if mode == MODE_SPECIAL:
         if state.current_agent == "runner":
-            # Sprint: 2-cell cardinal jump only.
+            # Sprint: 3-cell cardinal jump only.
             if dx == 0 and dy in (-3, 3):
                 unit = (0, dy // 3)
             elif dy == 0 and dx in (-3, 3):
@@ -138,16 +131,12 @@ def _cell_to_action(state: engine.GameState, mode: str, cell: tuple[int, int]) -
             return SPECIAL_ACTIONS[_DIR_TO_IDX_8[(dx, dy)]]
         return None
 
-    # Move / place / remove: any 1-cell direction.
+    # Move: any 1-cell direction.
     if (dx, dy) not in _DIR_TO_IDX_8:
         return None
     idx = _DIR_TO_IDX_8[(dx, dy)]
     if mode == MODE_MOVE:
         return MOVE_ACTIONS[idx]
-    if mode == MODE_PLACE:
-        return PLACE_WALL_ACTIONS[idx]
-    if mode == MODE_REMOVE:
-        return REMOVE_WALL_ACTIONS[idx]
     return None
 
 
@@ -166,13 +155,9 @@ def _legal_target_cells(state: engine.GameState, mode: str) -> set[tuple[int, in
 
     if mode == MODE_MOVE:
         add_8(MOVE_ACTIONS)
-    elif mode == MODE_PLACE:
-        add_8(PLACE_WALL_ACTIONS)
-    elif mode == MODE_REMOVE:
-        add_8(REMOVE_WALL_ACTIONS)
     elif mode == MODE_SPECIAL:
         if state.current_agent == "runner":
-            # Sprint: cardinal-only at distance 2; diagonals are illegal so
+            # Sprint: cardinal-only at distance 3; diagonals are illegal so
             # the legality mask filters them out automatically.
             add_8(SPECIAL_ACTIONS, distance=3)
         else:
@@ -205,15 +190,12 @@ class App:
 
     def _build_buttons(self) -> list[Button]:
         buttons: list[Button] = []
-        action_ys = [Y_BTN_MOVE, Y_BTN_PLACE, Y_BTN_REMOVE, Y_BTN_SPECIAL]
+        action_ys = [Y_BTN_MOVE, Y_BTN_SPECIAL]
         for mode, y in zip(ACTION_MODES, action_ys):
             buttons.append(Button(
                 pygame.Rect(SIDEBAR_X, y, SIDEBAR_W, BTN_H), mode.title(),
                 f"mode:{mode}",
             ))
-        buttons.append(Button(
-            pygame.Rect(SIDEBAR_X, Y_BTN_WAIT, SIDEBAR_W, BTN_H), "Wait", "wait",
-        ))
         gm_entries = [
             (Y_BTN_GM_1, "Human vs. Human", f"gm:{GM_HVH}"),
             (Y_BTN_GM_2, "Human catcher (AI runner)", f"gm:{GM_AI_RUNNER}"),
@@ -280,10 +262,7 @@ class App:
         self.ai_pending_at = pygame.time.get_ticks() + AI_DELAY_MS if self._is_ai_turn() else None
 
     def _on_button(self, key: str) -> None:
-        if key == "wait":
-            if not self.state.terminated and not self._is_ai_turn():
-                self._apply_action(ACTION_WAIT)
-        elif key == "new":
+        if key == "new":
             self._new_game()
         elif key.startswith("mode:"):
             self.mode = key.split(":", 1)[1]
@@ -319,14 +298,7 @@ class App:
             elif event.key == pygame.K_1:
                 self.mode = MODE_MOVE
             elif event.key == pygame.K_2:
-                self.mode = MODE_PLACE
-            elif event.key == pygame.K_3:
-                self.mode = MODE_REMOVE
-            elif event.key == pygame.K_4:
                 self.mode = MODE_SPECIAL
-            elif event.key == pygame.K_SPACE:
-                if not self.state.terminated and not self._is_ai_turn():
-                    self._apply_action(ACTION_WAIT)
         return True
 
     def _draw_grid(self) -> None:
@@ -337,6 +309,10 @@ class App:
                 pygame.draw.rect(self.screen, C_CELL, rect)
                 pygame.draw.rect(self.screen, C_GRID, rect, 1)
 
+        for sq in self.state.special_squares:
+            color = C_SPECIAL_CAPTURED if sq in self.state.captured_squares else C_SPECIAL
+            self._draw_special_square(sq, color)
+
         if not self.state.terminated and not self._is_ai_turn():
             targets = _legal_target_cells(self.state, self.mode)
             for cell in targets:
@@ -344,26 +320,19 @@ class App:
                 pygame.draw.rect(self.screen, C_CELL_HL, rect)
                 pygame.draw.rect(self.screen, C_GRID, rect, 1)
 
-        for (x, y), expiry in self.state.walls:
-            remaining = expiry - self.state.turn + 1
-            self._draw_wall((x, y), C_WALL, remaining)
-
         self._draw_agent(self.state.runner_pos, C_RUNNER, "R")
         self._draw_agent(self.state.catcher_pos, C_CATCHER, "C")
 
         self._draw_projectiles()
 
-    def _draw_wall(
-        self,
-        cell: tuple[int, int],
-        color: tuple[int, int, int],
-        remaining: Optional[int] = None,
+    def _draw_special_square(
+        self, cell: tuple[int, int], color: tuple[int, int, int]
     ) -> None:
-        rect = self._cell_rect(cell).inflate(-8, -8)
-        pygame.draw.rect(self.screen, color, rect, border_radius=4)
-        if remaining is not None and remaining > 0:
-            text = self.font_sm.render(str(remaining), True, C_TEXT)
-            self.screen.blit(text, text.get_rect(center=rect.center))
+        rect = self._cell_rect(cell)
+        pygame.draw.rect(self.screen, color, rect)
+        pygame.draw.rect(self.screen, C_GRID, rect, 1)
+        text = self.font_lg.render("*", True, C_BG)
+        self.screen.blit(text, text.get_rect(center=rect.center))
 
     def _draw_agent(self, cell: tuple[int, int], color: tuple[int, int, int], label: str) -> None:
         rect = self._cell_rect(cell)
@@ -405,15 +374,14 @@ class App:
 
         bullets = len(self.state.projectiles)
         r_line = (
-            f"Runner @ {self.state.runner_pos}   walls {len(self.state.walls)}/{engine.RUNNER_WALL_CAP}"
-            f"   sprint {self.state.sprint_charges}/{engine.SPRINT_CHARGES}"
+            f"Runner @ {self.state.runner_pos}   {self.state.sprint_charges} sprints left"
         )
-        c_line = f"Catcher @ {self.state.catcher_pos}   bullets in flight {bullets}"
+        c_line = f"Catcher @ {self.state.catcher_pos}   {bullets} bullets in flight "
         self.screen.blit(self.font_sm.render(r_line, True, C_RUNNER), (x, Y_STATS_R))
         self.screen.blit(self.font_sm.render(c_line, True, C_CATCHER), (x, Y_STATS_C))
 
         special_label = (
-            "Sprint (2 cells, cardinal)"
+            "Sprint (3 cells, cardinal)"
             if self.state.current_agent == "runner"
             else "Shoot (8 directions, unlimited)"
         )
@@ -433,7 +401,7 @@ class App:
             self._draw_button(btn, mouse)
 
         self.screen.blit(
-            self.font_sm.render("Keys: 1-4 modes  ·  Space wait  ·  R new game", True, C_TEXT_DIM),
+            self.font_sm.render("Keys: 1-2 modes  ·  R new game", True, C_TEXT_DIM),
             (x, Y_FOOTER),
         )
 

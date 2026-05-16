@@ -21,7 +21,13 @@ import random
 from typing import Optional
 
 from ..actions import ACTION_SPACE_SIZE
-from ..engine import Agent, GameState, legal_action_mask, step
+from ..engine import (
+    Agent,
+    BOARD_SIZE,
+    GameState,
+    legal_action_mask,
+    step,
+)
 
 
 def _chebyshev(p1: tuple[int, int], p2: tuple[int, int]) -> int:
@@ -37,13 +43,16 @@ def _score(state: GameState, action: int, role: Agent) -> float:
         return -math.inf
     distance = _chebyshev(new_state.runner_pos, new_state.catcher_pos)
     base = distance if role == "runner" else -distance
-    if role == "runner" and new_state.projectiles:
-        nearest = min(
-            _chebyshev(new_state.runner_pos, pos) for (pos, _) in new_state.projectiles
-        )
-        # Prefer cells farther from any bullet. Weight kept small so the
-        # runner still primarily flees the catcher.
-        base += 0.5 * nearest
+    if role == "runner":
+        uncaptured = new_state.special_squares - new_state.captured_squares
+        if uncaptured:
+            nearest_sq = min(_chebyshev(new_state.runner_pos, sq) for sq in uncaptured)
+            base += 1.5 * (BOARD_SIZE - nearest_sq)
+        if new_state.projectiles:
+            nearest = min(
+                _chebyshev(new_state.runner_pos, pos) for (pos, _) in new_state.projectiles
+            )
+            base += 0.5 * nearest
     return base
 
 
