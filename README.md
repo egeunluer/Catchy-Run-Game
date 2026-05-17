@@ -26,7 +26,7 @@ The launcher uses your existing `python3`, so `pygame` and `numpy` must be insta
 ## Mechanics
 
 - **Board:** 7×7. Runner starts at `(3, 0)`, catcher at `(3, 6)`. Runner moves first.
-- **Turn limit:** 40 half-turns. If no capture has happened by then, the runner wins iff they have captured at least **2** special squares; otherwise the catcher wins on timeout.
+- **Turn limit:** 40 half-turns. If no capture has happened by then, the runner wins iff they have captured at least **4** special squares (`SPECIAL_MAJORITY`); otherwise the catcher wins on timeout. Capturing all 7 special squares also ends the game immediately in the runner's favor.
 - **Capture (catcher wins immediately):** the catcher steps onto the runner's cell *or* a projectile fired by the catcher lands on the runner's cell.
 - **Movement:** 8 directions (N, NE, E, SE, S, SW, W, NW), one cell per turn. Diagonals are first-class.
 - **Special squares:** 7 cells sampled at game start, all outside the spawn neighborhood. The runner permanently captures one by stepping onto it; each capture also grants **+1 sprint charge**.
@@ -54,7 +54,7 @@ Coordinates: `(0, 0)` is top-left; `+x` east, `+y` south.
 - `reset(seed: int | None = None) -> GameState` — explicit `int` reproduces the same special-square layout deterministically; `None` uses OS entropy.
 - `step(state, action) -> (new_state, reward_runner, reward_catcher, terminated, truncated, info)` — pure, does not mutate input. Raises `ValueError` on illegal actions.
 - `legal_action_mask(state) -> np.ndarray[bool]` of shape `(16,)`. All-`False` for terminal states.
-- `encode_observation(state, perspective: str) -> np.ndarray[float32]` of shape `(7, 7, 7)`. `perspective` is `"runner"` or `"catcher"` and swaps own/opponent channels so a single network can play either role.
+- `encode_observation(state, perspective: str) -> np.ndarray[float32]` of shape `(9, 7, 7)`. `perspective` is `"runner"` or `"catcher"` and swaps own/opponent channels so a single network can play either role.
 - `clone(state) -> GameState`.
 - `with_overrides(state, **fields) -> GameState` — return a copy with selected fields replaced (for tests and scripted scenarios only; do not use inside `step`).
 
@@ -64,19 +64,21 @@ The engine has no GUI, file, or global state. Importing `engine` is side-effect 
 
 ### Observation channels
 
-Indexed `[channel, y, x]`. Shape `(7, 7, 7)`.
+Indexed `[channel, y, x]`. Shape `(9, 7, 7)`.
 
 | Channel | Content |
 |---|---|
 | 0 | Own position (one-hot) |
 | 1 | Opponent position (one-hot) |
-| 2 | Own charges remaining, normalized broadcast |
-| 3 | Opponent charges remaining, normalized broadcast |
+| 2 | Chebyshev distance between agents, normalized broadcast (`max(|dx|, |dy|) / (BOARD_SIZE - 1)`) |
+| 3 | Own sprint charges remaining, normalized broadcast (`sprint_charges / SPRINT_CHARGES`) |
 | 4 | Turn number, normalized broadcast (`turn / TURN_LIMIT`) |
-| 5 | Projectile mask — `1.0` in any cell with at least one in-flight bullet |
-| 6 | Uncaptured special squares |
+| 5 | Projectile presence mask — `1.0` at each in-flight bullet's cell |
+| 6 | Projectile direction `dx` at the bullet's cell, in `{-1, 0, +1}` |
+| 7 | Projectile direction `dy` at the bullet's cell, in `{-1, 0, +1}` |
+| 8 | Uncaptured special squares |
 
-The catcher's "charges" channel is always 0 — its shoot is unlimited. The slot is kept so the tensor stays symmetric across perspectives.
+Channel 3 carries the runner's sprint counter. The catcher has no depletable resource (shoot is unlimited), so under the catcher perspective this channel is constant 0.
 
 Rewards: `±1.0` to the winner / loser on termination, `0.0` on every other step.
 

@@ -48,7 +48,7 @@ from .actions import (
 
 BOARD_SIZE: int = 7
 TURN_LIMIT: int = 40
-SPRINT_CHARGES: int = 2
+SPRINT_CHARGES: int = 3
 RUNNER_START: tuple[int, int] = (3, 0)
 CATCHER_START: tuple[int, int] = (3, BOARD_SIZE - 1)
 
@@ -56,9 +56,9 @@ CATCHER_START: tuple[int, int] = (3, BOARD_SIZE - 1)
 # squares (see _sample_special_squares) by stepping onto them. Capture is
 # permanent. At turn TURN_LIMIT (no catch), runner wins iff it owns at
 # least SPECIAL_MAJORITY of them.
-SPECIAL_MAJORITY: int = 2
+SPECIAL_MAJORITY: int = 4
 
-OBS_CHANNELS: int = 7
+OBS_CHANNELS: int = 9
 
 Agent = Literal["runner", "catcher"]
 Position = tuple[int, int]
@@ -293,7 +293,7 @@ def _apply(state: GameState, action: int) -> tuple[GameState, float, float]:
     bullet_hit_runner = any(p == (rx, ry) for (p, _) in projectiles)
     caught = caught_by_move or bullet_hit_runner
     timed_out = (not caught) and new_turn >= TURN_LIMIT
-    terminated = caught or timed_out
+    terminated = caught or timed_out or len(captured) == 7
 
     winner: Optional[Agent]
     if caught:
@@ -306,6 +306,9 @@ def _apply(state: GameState, action: int) -> tuple[GameState, float, float]:
         else:
             winner = "catcher"
             reward_runner, reward_catcher = -1.0, 1.0
+    elif len(captured) == 7:
+        winner = "runner"
+        reward_runner, reward_catcher = 1.0, -1.0
     else:
         winner = None
         reward_runner, reward_catcher = 0.0, 0.0
@@ -357,18 +360,20 @@ def encode_observation(state: GameState, perspective: Agent) -> np.ndarray:
     Channels:
         0: own position (one-hot)
         1: opponent position (one-hot)
-        2: own charges remaining (normalized scalar broadcast)
-        3: opponent charges remaining (normalized scalar broadcast)
+        2: Chebyshev distance between agents (normalized scalar broadcast)
+        3: own sprint charges remaining (normalized scalar broadcast)
         4: turn number (normalized scalar broadcast)
-        5: projectile mask (1.0 in any cell containing >= 1 projectile)
-        6: uncaptured special squares (1.0 at each remaining target cell)
+        5: projectile presence mask (1.0 at each in-flight bullet's cell)
+        6: projectile direction dx at each bullet cell, in {-1, 0, +1}
+        7: projectile direction dy at each bullet cell, in {-1, 0, +1}
+        8: uncaptured special squares (1.0 at each remaining target cell)
 
-    `perspective` swaps own / opponent positions so a single network can
-    play either role. Coordinates: array is indexed [channel, y, x].
+    `perspective` swaps own / opponent position channels so a single network
+    can play either role. Coordinates: array is indexed [channel, y, x].
 
-    Charge channels: only the runner has a depletable charge (sprint). The
-    catcher's shoot is unlimited, so its charge channel is constant 0. The
-    slot is preserved so the tensor shape is symmetric across perspectives.
+    Channel 3 is the runner's sprint counter. The catcher has no depletable
+    resource (shoot is unlimited), so under the catcher perspective this
+    channel is constant 0.
     """
     if perspective not in ("runner", "catcher"):
         raise ValueError(f"perspective must be 'runner' or 'catcher', got {perspective!r}")
@@ -378,22 +383,24 @@ def encode_observation(state: GameState, perspective: Agent) -> np.ndarray:
     if perspective == "runner":
         own_pos, opp_pos = state.runner_pos, state.catcher_pos
         own_charges_norm = state.sprint_charges / max(SPRINT_CHARGES, 1)
-        opp_charges_norm = 0.0
     else:
         own_pos, opp_pos = state.catcher_pos, state.runner_pos
         own_charges_norm = 0.0
-        opp_charges_norm = state.sprint_charges / max(SPRINT_CHARGES, 1)
+
+    chebyshev_norm = _chebyshev(state.runner_pos, state.catcher_pos) / max(BOARD_SIZE - 1, 1)
 
     obs[0, own_pos[1], own_pos[0]] = 1.0
     obs[1, opp_pos[1], opp_pos[0]] = 1.0
-    obs[2, :, :] = own_charges_norm
-    obs[3, :, :] = opp_charges_norm
+    obs[2, :, :] = chebyshev_norm
+    obs[3, :, :] = own_charges_norm
     obs[4, :, :] = state.turn / TURN_LIMIT
-    for (px, py), _ in state.projectiles:
+    for (px, py), (pdx, pdy) in state.projectiles:
         obs[5, py, px] = 1.0
+        obs[6, py, px] = pdx
+        obs[7, py, px] = pdy
     for (sx, sy) in state.special_squares:
         if (sx, sy) not in state.captured_squares:
-            obs[6, sy, sx] = 1.0
+            obs[8, sy, sx] = 1.0
 
     return obs
 

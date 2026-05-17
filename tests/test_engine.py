@@ -41,6 +41,7 @@ from catcher_vs_runner.engine import (
     CATCHER_START,
     OBS_CHANNELS,
     RUNNER_START,
+    SPECIAL_MAJORITY,
     SPRINT_CHARGES,
     TURN_LIMIT,
     GameState,
@@ -169,7 +170,7 @@ def test_catcher_capture_by_diagonal_move():
 
 
 def test_runner_sprint_three_cells_cardinal():
-    state = reset()
+    state = with_overrides(reset(), special_squares=frozenset(), captured_squares=frozenset())
     new_state, *_ = step(state, ACTION_SPECIAL_E)
     assert new_state.runner_pos == (6, 0)
     assert new_state.sprint_charges == SPRINT_CHARGES - 1
@@ -423,7 +424,8 @@ def test_catcher_wins_on_timeout_without_majority():
 
 
 def test_runner_wins_on_timeout_with_majority():
-    captured = frozenset({(3, 3), (4, 4)})
+    captured = frozenset({(3, 3), (4, 4), (3, 4), (4, 3)})
+    assert len(captured) >= SPECIAL_MAJORITY
     state = with_overrides(
         reset(),
         runner_pos=(0, 0),
@@ -520,7 +522,7 @@ def test_observation_shape_and_dtype():
     obs = encode_observation(state, "runner")
     assert obs.shape == (OBS_CHANNELS, BOARD_SIZE, BOARD_SIZE)
     assert obs.dtype == np.float32
-    assert OBS_CHANNELS == 7
+    assert OBS_CHANNELS == 9
 
 
 def test_observation_invalid_perspective_rejected():
@@ -541,9 +543,12 @@ def test_observation_perspective_swaps_own_and_opponent():
 
     np.testing.assert_array_equal(runner_obs[0], catcher_obs[1])
     np.testing.assert_array_equal(runner_obs[1], catcher_obs[0])
-    # Charge channels: runner has sprint, catcher has none.
-    assert runner_obs[2, 0, 0] == pytest.approx(2 / SPRINT_CHARGES)
-    assert catcher_obs[2, 0, 0] == pytest.approx(0.0)
+    # Chebyshev distance is symmetric across perspectives.
+    np.testing.assert_array_equal(runner_obs[2], catcher_obs[2])
+    assert runner_obs[2, 0, 0] == pytest.approx(3 / (BOARD_SIZE - 1))
+    # Own-charges channel: runner has sprint, catcher has none.
+    assert runner_obs[3, 0, 0] == pytest.approx(2 / SPRINT_CHARGES)
+    assert catcher_obs[3, 0, 0] == pytest.approx(0.0)
     np.testing.assert_array_equal(runner_obs[4], catcher_obs[4])  # turn shared
 
 
@@ -564,6 +569,15 @@ def test_observation_projectile_channel():
         projectiles=frozenset({((3, 4), (0, -1)), ((1, 2), (1, 1))}),
     )
     obs = encode_observation(state, "runner")
+    # Presence mask at each bullet's cell.
     assert obs[5, 4, 3] == 1.0
     assert obs[5, 2, 1] == 1.0
     assert obs[5].sum() == 2.0
+    # Signed direction channels at the same cells.
+    assert obs[6, 4, 3] == 0.0
+    assert obs[7, 4, 3] == -1.0
+    assert obs[6, 2, 1] == 1.0
+    assert obs[7, 2, 1] == 1.0
+    # Direction channels are zero everywhere else.
+    assert (obs[6] != 0).sum() == 1
+    assert (obs[7] != 0).sum() == 2
