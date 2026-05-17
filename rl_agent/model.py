@@ -25,25 +25,27 @@ def train(total_timesteps: int = 200_000,
           load_from: str | None = None,
           save_to: str = "catchy_run_stage1_v0",
           tb_log_name: str = "stage1_v0",
+          ent_coef: float = 0.01
           ):
     env = make_env()
     if load_from is not None:
         model = MaskablePPO.load(load_from, env=env)
+        model.ent_coef = ent_coef
     else:
         model = MaskablePPO(
-        policy="CnnPolicy",
-        env=env,
-        policy_kwargs=policy_kwargs,
-        learning_rate=3e-4,
-        n_steps=2048,
-        batch_size=64,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.01,
-        verbose=1,
-        tensorboard_log="./tb_logs/",
-        device="auto"
+            policy="CnnPolicy",
+            env=env,
+            policy_kwargs=policy_kwargs,
+            learning_rate=3e-4,
+            n_steps=2048,
+            batch_size=64,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            ent_coef=0.01,
+            verbose=1,
+            tensorboard_log="./tb_logs/",
+            device="auto"
         )
     model.learn(total_timesteps=total_timesteps, tb_log_name=tb_log_name, reset_num_timesteps=(load_from is None), callback=checkpoint_callback)
     model.save(save_to)

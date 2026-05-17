@@ -34,6 +34,12 @@ class CatchyRunEnv(gym.Env):
         mask = engine.legal_action_mask(self.state)
         return {"action_mask" : mask, "trainee_role": self.trainee_role}
 
+    def _shape_reward(self, prev, curr, base):
+        if self.trainee_role != "runner":
+            return base
+        newly_captured = len(curr.captured_squares) - len(prev.captured_squares)
+        return base + 0.05 * newly_captured
+
     #Opponent configuration
     def set_opponent(self, opponent_policy):
         self._opponent_policy = opponent_policy
@@ -75,16 +81,16 @@ class CatchyRunEnv(gym.Env):
         mask = engine.legal_action_mask(self.state)
         if not mask[action]:
             action = int(self.np_random.choice(np.flatnonzero(mask)))
+        prev_state = self.state
         new_state, r_runner, r_catcher, terminated, _, _ = engine.step(self.state, action)
         self.state = new_state
         reward = r_runner if self.trainee_role == "runner" else r_catcher
         if not terminated:
             opp_reward, terminated = self._play_opponent_turn()
             reward += opp_reward
+        reward = self._shape_reward(prev_state, self.state, reward)
         return self._obs(), reward, terminated, False, self._info()
 
 check_env(CatchyRunEnv())
-
-
 
 
