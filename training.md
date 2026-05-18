@@ -1,8 +1,8 @@
 # Training Guide
 
-End-to-end plan for training a self-play agent on Catcher vs. Runner.
+End-to-end plan for training Catcher vs. Runner agents. **One network per role** — the runner and catcher are trained as separate `MaskablePPO` models that only meet at evaluation (and during cross-play in Stage 2+).
 
-The same network plays both roles. Training happens in three stages of escalating opponent strength: heuristic → frozen self → league of past snapshots.
+Training escalates in opponent strength: random → heuristic → cross-play → league.
 
 ---
 
@@ -10,9 +10,18 @@ The same network plays both roles. Training happens in three stages of escalatin
 
 Tick boxes as you progress:
 
-- [ ] **Stage 1** — train against the bundled heuristic agent
-- [ ] **Stage 2** — train against a frozen snapshot of the current policy
-- [ ] **Stage 3** — train against a sampled pool of past snapshots + heuristic
+### Runner
+- [ ] **Stage 0** — explore the grid against a random opponent; learn to capture squares
+- [ ] **Stage 1** — train against the bundled heuristic catcher
+- [ ] **Stage 2** — train against the latest catcher snapshot
+- [ ] **Stage 3** — train against a pool of past catcher snapshots + heuristic
+
+### Catcher
+- [ ] **Stage 1** — train against the bundled heuristic runner
+- [ ] **Stage 2** — train against the latest runner snapshot
+- [ ] **Stage 3** — train against a pool of past runner snapshots + heuristic
+
+The catcher has no Stage 0: its objective (catch the runner / stall to timeout) gives dense enough feedback that learning against the heuristic runner from scratch works.
 
 ---
 
@@ -21,45 +30,107 @@ Tick boxes as you progress:
 ```
 rl_agent/
   environment.py      CatchyRunEnv — single-agent Gym env with the opponent
-                      played inline inside step(). Trainee role is randomized
-                      per episode and exposed via channel 0 of the observation.
+                      played inline inside step(). Trainee role is fixed at
+                      construction via the trainee_role kwarg.
   opponents.py        heuristic_opponent — adapts the bundled heuristic agent
                       to the (state) -> int contract the env expects.
   custom_cnn.py       CustomGridCNN feature extractor (3× Conv2d + linear),
-                      sized for the 10×7×7 observation tensor.
+                      sized for the 9×7×7 observation tensor.
   model.py            MaskablePPO + CnnPolicy + custom extractor. Entry point
-                      for training.
+                      for training. trainee_role is threaded through.
 ```
 
-Key design choices already made:
+Key design choices:
+- **Two networks.** One model per role. No shared weights, no role channel.
 - **Algorithm:** `MaskablePPO` from `sb3-contrib` — handles action masking via `info["action_mask"]`.
-- **Observation:** `(10, 7, 7)` — engine's 9 channels plus an explicit role indicator (channel 0).
-- **Reward:** sparse ±1 on termination, sign flipped to match the trainee's role.
-- **Self-play strategy:** opponent plays inline inside `env.step`, so SB3 sees a normal single-agent env.
+- **Observation:** `(9, 7, 7)` — the engine's 9 channels. Each model sees only its own role's perspective.
+- **Reward:** sparse ±1 on termination, sign flipped to the trainee's role. Runner additionally gets `+0.05 * newly_captured` shaping (`environment.py:_shape_reward`).
+- **Opponent strategy:** opponent plays inline inside `env.step`, so SB3 sees a normal single-agent env.
 
 ---
 
-## Stage 1 — Heuristic opponent
+## Stage 0 — Runner vs. random (exploration)
 
-**Goal:** establish a skill floor. The bundled heuristic gives a non-trivial, stationary target for the policy to climb to before we introduce the moving target of self-play.
+**Goal:** the runner learns the *objective*. Against a near-passive opponent the only meaningful gradient comes from the `+0.05` capture shaping and the `+1` terminal for sweeping all 7 special squares. By the end of Stage 0 the runner should reliably head for special squares.
+
+**Why no catcher version:** the catcher's reward density doesn't need this scaffolding — it can learn directly vs. the heuristic runner.
+
+### How it works
+
+`CatchyRunEnv.__init__` falls back to `_default_opponent` (random legal action) when no `opponent_policy` is passed. So the entire setup is:
+
+```python
+def make_env():
+    env = CatchyRunEnv(trainee_role="runner")    # opponent defaults to random
+    env = ActionMasker(env, mask_fn)
+    return env
+```
+
+Train fresh — no `load_from`.
 
 ### Run
-
-From the project root:
 
 ```bash
 python -m rl_agent.model
 ```
 
-In a second terminal:
+Budget: 200k steps.
+
+### Move-on criteria
+
+- [ ] Runner captures all 7 special squares in the majority of episodes
+- [ ] Win rate vs. random catcher is near 100%
+- [ ] Episode length trends *down* over training — the runner is finishing faster, not stalling
+
+### Common failures
+
+- `ep_rew_mean` stuck near 0 → the runner isn't even stumbling onto special squares. Bump shaping to `0.2` per capture.
+- Entropy stuck high (~`ln(n_legal)`) with flat losses → no signal is reaching the policy. Re-check `_shape_reward` and the mask threading before extending the run.
+
+### Output
+
+`catchy_run_runner_stage0.zip` — seed for Stage 1.
+
+---
+
+## Stage 1 — Heuristic opponent
+
+**Goal:** establish a skill floor. Each model trains against the bundled heuristic of the opposing role.
+
+### Setup
+
+**Runner** — load Stage 0 checkpoint, switch opponent to the heuristic catcher:
+
+```python
+def make_env():
+    env = CatchyRunEnv(trainee_role="runner", opponent_policy=heuristic_opponent)
+    env = ActionMasker(env, mask_fn)
+    return env
+
+train(load_from="catchy_run_runner_stage0",
+      save_to="catchy_run_runner_stage1",
+      tb_log_name="runner_stage1",
+      ent_coef=0.005)   # lower entropy so it refines instead of thrashing
+```
+
+**Catcher** — from scratch against the heuristic runner:
+
+```python
+def make_env():
+    env = CatchyRunEnv(trainee_role="catcher", opponent_policy=heuristic_opponent)
+    env = ActionMasker(env, mask_fn)
+    return env
+
+train(save_to="catchy_run_catcher_stage1", tb_log_name="catcher_stage1")
+```
+
+The two trainings are independent — run them sequentially or in parallel processes.
+
+### Monitor
 
 ```bash
 tensorboard --logdir ./tb_logs/
 ```
-
-Open `http://localhost:6006` in a browser.
-
-### What to watch on TensorBoard
 
 | Metric | Group | Healthy signal |
 |---|---|---|
@@ -69,68 +140,67 @@ Open `http://localhost:6006` in a browser.
 | `clip_fraction` | train | 0.1–0.3 healthy. >0.5 → drop `learning_rate`. |
 | `approx_kl` | train | <0.02 fine. >0.05 → updates too aggressive. |
 
-### Move-on criteria
+### Move-on criteria (per model)
 
-Stage 1 is complete when **all** of these are true:
-
-- [ ] Win rate vs. heuristic plateaus at **≥70%** for several evaluations
+- [ ] Win rate vs. opposing heuristic plateaus at **≥70%** for several evaluations
 - [ ] Plateau holds for ~50k–100k steps with no further improvement
 - [ ] Policy entropy has stabilized (not collapsed to zero, not still drifting)
 
-200k steps is the initial budget. If the plateau hasn't been reached, extend to 500k or 1M. If `ep_rew_mean` hasn't moved off zero after 50k steps, **stop and debug** — don't keep burning compute. Common causes:
+200k steps is the initial budget. If a plateau hasn't been reached, extend to 500k or 1M. If `ep_rew_mean` hasn't moved off zero after 50k steps, **stop and debug** — don't keep burning compute. Common causes:
 - Mask not threading through `ActionMasker` correctly
 - Reward sign flipped
 - Opponent function broken
-- Observation/role channel misaligned
+- For the runner: forgot to `load_from` the Stage 0 checkpoint, so it doesn't know to capture squares
 
 ### Output
 
-`catchy_run_stage1.zip` — the trained model. Used as the seed snapshot for Stage 2.
+`catchy_run_runner_stage1.zip` and `catchy_run_catcher_stage1.zip` — seeds for Stage 2.
 
 ---
 
-## Stage 2 — Frozen self-play
+## Stage 2 — Cross-play (each model vs. the other)
 
 **Status:** not yet implemented.
 
-**Goal:** climb past the heuristic ceiling by training against ever-improving copies of yourself.
+**Goal:** climb past the heuristic ceiling by training each model against the latest snapshot of the *other* model. With two separate networks, cross-play replaces "frozen self-play" — each side has a real, learning adversary instead of a copy of itself.
 
 ### What needs to be built
 
 1. **Snapshot loader** in `opponents.py`:
    ```python
-   def make_snapshot_opponent(model_path: str):
+   def make_snapshot_opponent(model_path: str, opponent_role: str):
        model = MaskablePPO.load(model_path)
        def opponent(state):
-           obs = build_obs_for_opponent(state)        # use opponent's perspective
+           obs = engine.encode_observation(state, opponent_role)
            mask = engine.legal_action_mask(state)
            action, _ = model.predict(obs, action_masks=mask, deterministic=True)
            return int(action)
        return opponent
    ```
 
-2. **`SelfPlayCallback`** — periodically snapshots the live policy and pushes it into the env as the new opponent. Fires every ~20k steps:
+2. **`CrossPlayCallback`** — every ~20k steps, snapshot the model being trained to a shared directory:
    ```python
-   class SelfPlayCallback(BaseCallback):
+   class CrossPlayCallback(BaseCallback):
        def _on_step(self):
            if self.num_timesteps - self.last_snapshot >= 20_000:
-               snapshot = copy.deepcopy(self.model.policy).eval()
-               self.training_env.env_method("set_opponent", wrap_as_callable(snapshot))
+               path = f"snapshots/{self.role}_{self.num_timesteps}.zip"
+               self.model.save(path)
                self.last_snapshot = self.num_timesteps
            return True
    ```
+   Each training process polls the *other* role's snapshot directory and rotates its env opponent (via `env.set_opponent(...)`) when a new snapshot appears.
 
-3. **Initialize from Stage 1.** Load `catchy_run_stage1.zip` as both the trainee starting weights *and* the initial opponent.
+3. **Initialize from Stage 1.** Each model loads its Stage 1 checkpoint as starting weights; the initial opponent is the other model's Stage 1 checkpoint.
 
-### Move-on criteria
+### Move-on criteria (per model)
 
-- [ ] Win rate vs. **the heuristic** holds at ≥80% (regression check)
-- [ ] Win rate vs. **last snapshot** stays near 50% over several updates (sign of healthy self-play convergence — neither side dominates after each snapshot rotation)
+- [ ] Win rate vs. **opposing heuristic** holds at ≥80% (regression check)
+- [ ] Win rate vs. **latest opposing snapshot** stays near 50% over several updates (sign of healthy convergence — neither side dominates after rotation)
 - [ ] Episode length and entropy are stable
 
 ### Output
 
-`catchy_run_stage2.zip` plus a directory of intermediate snapshots — seeds the Stage 3 pool.
+`catchy_run_runner_stage2.zip`, `catchy_run_catcher_stage2.zip`, plus a directory of intermediate snapshots — seeds the Stage 3 pool.
 
 ---
 
@@ -138,30 +208,30 @@ Stage 1 is complete when **all** of these are true:
 
 **Status:** not yet implemented.
 
-**Goal:** prevent overfitting to the latest self by training against a *mix* of past opponents. Catches the "policy beats current opponent but forgets how to beat older strategies" failure mode.
+**Goal:** prevent overfitting to the *latest* opposing model by training against a *mix* of past opponents. Catches the "policy beats current opponent but forgets older strategies" failure mode.
 
 ### What needs to be built
 
-1. **Pool assembly** — collect heuristic + last N snapshots (N ≈ 5–10):
+1. **Pool assembly** (per model) — heuristic of opposing role + last N snapshots of opposing role (N ≈ 5–10):
    ```python
    pool = [heuristic_opponent]
-   for snapshot_path in recent_snapshots(n=8):
-       pool.append(make_snapshot_opponent(snapshot_path))
+   for snap in recent_snapshots(role="catcher", n=8):
+       pool.append(make_snapshot_opponent(snap, opponent_role="catcher"))
    env.set_opponent_pool(pool)
    ```
 
-2. **Pool refresh in callback** — every snapshot, append the new snapshot and drop the oldest non-heuristic.
+2. **Pool refresh** — every new snapshot, append it and drop the oldest non-heuristic entry.
 
 The env already supports this via `set_opponent_pool` — no env changes needed.
 
-### Move-on criteria
+### Move-on criteria (per model)
 
 - [ ] Win rate vs. **every member of the pool** is roughly balanced (no single opponent dominates or gets dominated by ≥80%)
-- [ ] Win rate vs. **heuristic** stays at ≥80%
+- [ ] Win rate vs. **opposing heuristic** stays at ≥80%
 
 ### Output
 
-The final trained model.
+Final trained models: `catchy_run_runner_final.zip`, `catchy_run_catcher_final.zip`.
 
 ---
 
@@ -175,9 +245,9 @@ tensorboard --logdir ./tb_logs/
 tensorboard --logdir ./tb_logs/ --port 6007
 ```
 
-- Each `model.learn(...)` call creates a subdirectory `<name>_N/`. Use `tb_log_name="stage1_v1"` etc. in `model.learn` to name runs.
+- Each `model.learn(...)` call creates a subdirectory `<name>_N/`. Use distinct `tb_log_name` per run (e.g. `runner_stage0`, `catcher_stage1_v2`) so runs don't pile into the same line.
 - Smoothing slider (~0.6) is essential for `ep_rew_mean` — raw curve is jittery.
-- Toggle runs in the left sidebar to compare experiments.
+- Toggle runs in the left sidebar to compare across roles and stages.
 
 ---
 
@@ -187,15 +257,15 @@ Current values in `model.py`:
 
 | Param | Value | Reason |
 |---|---|---|
-| `learning_rate` | `3e-4` | PPO standard. Drop to `1e-4` if `approx_kl` consistently >0.05. |
+| `learning_rate` | `3e-4` | PPO standard. Drop to `1e-4` when continuing from a checkpoint (Stage 1+). |
 | `n_steps` | `2048` | ~50–100 episodes per rollout at 40-turn max. |
 | `batch_size` | `64` | Default; fine for tiny network. |
 | `gamma` | `0.99` | Discount. Short episodes mean this barely matters. |
 | `gae_lambda` | `0.95` | GAE smoothing. Default. |
 | `clip_range` | `0.2` | PPO clip. Default. |
-| `ent_coef` | `0.01` | Entropy bonus. **Bump to 0.05 if policy collapses early in Stage 1.** |
+| `ent_coef` | `0.01` | Entropy bonus. Drop to `~0.005` once a stage's policy is moving. Bump to `0.05` if the policy collapses early. |
 
-Don't tune anything before a sparse-reward Stage 1 run has clearly failed.
+Don't tune anything before a stage run has clearly failed.
 
 ---
 
@@ -203,11 +273,14 @@ Don't tune anything before a sparse-reward Stage 1 run has clearly failed.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `ep_rew_mean` flat at 0 | Mask not reaching policy, or opponent broken | Verify `ActionMasker` is wrapping the env; print the mask inside `mask_fn` |
-| `ep_rew_mean` strongly negative | Reward sign flipped, or opponent is too strong | Check `_play_opponent_turn` reward extraction |
+| `ep_rew_mean` flat at 0 (Stage 0) | Runner not finding special squares | Bump capture shaping to `0.2` |
+| `ep_rew_mean` flat at 0 (Stage 1) | Mask not reaching policy, or opponent broken | Verify `ActionMasker` is wrapping the env; print the mask inside `mask_fn` |
+| `ep_rew_mean` strongly negative | Reward sign flipped, or opponent way too strong | Check `_play_opponent_turn` reward extraction; consider warming up with a weaker opponent |
 | `entropy_loss` near 0 within 10k steps | Premature commitment | Bump `ent_coef` to `0.05` |
+| Entropy stays near max with losses flat | No reward signal reaching the policy | Stop the run; check shaping and opponent strength |
 | `approx_kl` repeatedly >0.1 | Updates too aggressive | Lower `learning_rate` to `1e-4` or `n_epochs` to 5 |
-| Training crashes with shape mismatch | `observation_space` not matching `_obs()` output | Confirm both are `(10, 7, 7)` |
+| Training crashes with shape mismatch | `observation_space` not matching `_obs()` output | Confirm both are `(9, 7, 7)` |
+| Catcher training silently still trains runner | `trainee_role` arg ignored in `__init__` | Confirm `self.trainee_role = trainee_role` (not hard-coded to `"runner"`) |
 
 ---
 
@@ -215,10 +288,11 @@ Don't tune anything before a sparse-reward Stage 1 run has clearly failed.
 
 | File | Purpose |
 |---|---|
-| `rl_agent/environment.py` | The Gym env. |
+| `rl_agent/environment.py` | The Gym env. `trainee_role` fixed at construction. |
 | `rl_agent/opponents.py` | Opponent callables. Heuristic now; snapshot loader for Stage 2. |
-| `rl_agent/custom_cnn.py` | CNN feature extractor + `policy_kwargs`. |
+| `rl_agent/custom_cnn.py` | CNN feature extractor + `policy_kwargs`. Sized for 9×7×7. |
 | `rl_agent/model.py` | Training entry point. |
 | `catcher_vs_runner/engine.py` | Pure game logic. Do not modify for RL needs. |
 | `tb_logs/` | TensorBoard event files (created on first run). |
-| `catchy_run_stage1.zip` | Stage 1 model output. |
+| `catchy_run_runner_stageN.zip` | Runner model checkpoints. |
+| `catchy_run_catcher_stageN.zip` | Catcher model checkpoints. |

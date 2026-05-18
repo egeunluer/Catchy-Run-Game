@@ -5,7 +5,7 @@ class CustomGridCNN(BaseFeaturesExtractor):
 
     def __init__(self, observation_space, features_dim: int = 128):
         super().__init__(observation_space, features_dim)
-        n_input_channels = observation_space.shape[0] #which is 10 in our case
+        n_input_channels = observation_space.shape[0] #which is 9 in our case
         self.cnn = nn.Sequential(
             nn.Conv2d(n_input_channels, 32, kernel_size=3, padding=1), nn.ReLU(),
             nn.Conv2d(32,64,kernel_size=3, padding=1), nn.ReLU(),

@@ -12,35 +12,42 @@ class CatchyRunEnv(gym.Env):
         mask = engine.legal_action_mask(state)
         return int(self.np_random.choice(np.flatnonzero(mask)))
 
-    def __init__(self, opponent_policy = None):
+    def __init__(self, trainee_role : engine.Agent, opponent_policy = None):
         super().__init__()
         self._opponent_pool = None
         self._opponent_policy = opponent_policy or self._default_opponent
         self._current_opponent = self._opponent_policy
-        self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(10,7,7), dtype=np.float32)
+        self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(9,7,7), dtype=np.float32)
         self.action_space = gym.spaces.Discrete(16)
         self.state: Optional[engine.GameState] = None
-        self.trainee_role: engine.Agent = "runner"
+        self.trainee_role: engine.Agent = trainee_role
 
     #Extract the observation from the engine + add the perspective channel at the start
     def _obs(self) -> np.ndarray:
-        base = engine.encode_observation(self.state, self.trainee_role)
-        role_value = 1.0 if self.trainee_role == "runner" else 0.0
-        role_channel = np.full((1, 7, 7), role_value, dtype=np.float32)
-        return np.concatenate([role_channel, base], axis=0)
+        return engine.encode_observation(self.state, self.trainee_role)
 
     #Extract the action mask and the trainee role
     def _info(self):
         mask = engine.legal_action_mask(self.state)
         return {"action_mask" : mask, "trainee_role": self.trainee_role}
 
+    DANGER_RADIUS = 1  # squares within this Manhattan distance of the catcher are filtered from the attraction term
+
     def _shape_reward(self, prev, curr, base):
         if self.trainee_role != "runner":
             return base
         newly_captured = len(curr.captured_squares) - len(prev.captured_squares)
-        return base + 0.05 * newly_captured
+        shaped = base + 0.1 * newly_captured
+        remaining = curr.special_squares - curr.captured_squares
+        if remaining:
+            cx, cy = curr.catcher_pos
+            safe = [s for s in remaining if abs(s[0] - cx) + abs(s[1] - cy) > self.DANGER_RADIUS]
+            if safe:
+                def dist(pos): return min(abs(pos[0] - x) + abs(pos[1] - y) for x, y in safe)
+                shaped += 0.01 * (dist(prev.runner_pos) - dist(curr.runner_pos))
+        return shaped
 
-    #Opponent configuration
+        #Opponent configuration
     def set_opponent(self, opponent_policy):
         self._opponent_policy = opponent_policy
         self._opponent_pool = None
@@ -72,7 +79,6 @@ class CatchyRunEnv(gym.Env):
         super().reset(seed=seed)
         self.state = engine.reset(seed=seed)
         self._current_opponent = self._sample_opponent()
-        self.trainee_role = "runner" if self.np_random.random() < 0.5 else "catcher"
         if self.state.current_agent != self.trainee_role:
             self._play_opponent_turn()
         return self._obs(), self._info()
@@ -91,6 +97,6 @@ class CatchyRunEnv(gym.Env):
         reward = self._shape_reward(prev_state, self.state, reward)
         return self._obs(), reward, terminated, False, self._info()
 
-check_env(CatchyRunEnv())
+#check_env(CatchyRunEnv(trainee_role="runner"))
 
 
