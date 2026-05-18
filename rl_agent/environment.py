@@ -7,6 +7,10 @@ from grid.catcher_vs_runner import engine as engine
 class CatchyRunEnv(gym.Env):
 
     metadata = {"render_modes": [], "name": "catchy_run_v0"}
+    DANGER_RADIUS = 1  # squares within this Manhattan distance of the catcher are filtered from the attraction term
+    CATCHER_ADJACENCY_PENALTY = 0.02  # applied when runner is Manhattan-adjacent to the catcher
+    PROJECTILE_THREAT_PENALTY = 0.03  # applied when runner is on the square a projectile will arrive at next tick
+
 
     def _default_opponent(self, state):
         mask = engine.legal_action_mask(state)
@@ -31,20 +35,29 @@ class CatchyRunEnv(gym.Env):
         mask = engine.legal_action_mask(self.state)
         return {"action_mask" : mask, "trainee_role": self.trainee_role}
 
-    DANGER_RADIUS = 1  # squares within this Manhattan distance of the catcher are filtered from the attraction term
-
     def _shape_reward(self, prev, curr, base):
         if self.trainee_role != "runner":
             return base
         newly_captured = len(curr.captured_squares) - len(prev.captured_squares)
         shaped = base + 0.1 * newly_captured
+
+        rx, ry = curr.runner_pos
+        cx, cy = curr.catcher_pos
+
         remaining = curr.special_squares - curr.captured_squares
         if remaining:
-            cx, cy = curr.catcher_pos
             safe = [s for s in remaining if abs(s[0] - cx) + abs(s[1] - cy) > self.DANGER_RADIUS]
             if safe:
                 def dist(pos): return min(abs(pos[0] - x) + abs(pos[1] - y) for x, y in safe)
                 shaped += 0.01 * (dist(prev.runner_pos) - dist(curr.runner_pos))
+
+        if abs(rx - cx) + abs(ry - cy) <= 1:
+            shaped -= self.CATCHER_ADJACENCY_PENALTY
+
+        projectile_next = {(p[0] + d[0], p[1] + d[1]) for (p, d) in curr.projectiles}
+        if (rx, ry) in projectile_next:
+            shaped -= self.PROJECTILE_THREAT_PENALTY
+
         return shaped
 
         #Opponent configuration
