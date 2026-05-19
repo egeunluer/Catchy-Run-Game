@@ -56,4 +56,4 @@ def train(trainee_role: Agent,
 
 if __name__ == "__main__":
     #Change the signature of this train method to continue from a trained model
-    train(load_from="catchy_run_runner_stage0_v1",total_timesteps= 300000,trainee_role="runner", save_to="catchy_run_runner_stage0_v2", tb_log_name="runner_stage0_v2")
+    train(load_from= "catchy_run_runner_stage0_v0",total_timesteps= 300000,trainee_role="runner", save_to="catchy_run_runner_stage0_v1", tb_log_name="runner_stage0_v1")
