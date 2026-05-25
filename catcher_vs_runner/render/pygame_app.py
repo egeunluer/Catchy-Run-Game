@@ -26,6 +26,7 @@ from ..actions import (
     SPECIAL_ACTIONS,
 )
 from ..agents.heuristic import catcher_policy, runner_policy
+from ..agents.rl_runner import rl_runner_policy
 
 # --- Layout --------------------------------------------------------------
 
@@ -57,7 +58,8 @@ Y_HDR_GAME = Y_DIV2 + 12
 Y_BTN_GM_1 = Y_HDR_GAME + 28
 Y_BTN_GM_2 = Y_BTN_GM_1 + BTN_STEP
 Y_BTN_GM_3 = Y_BTN_GM_2 + BTN_STEP
-Y_BTN_NEW = Y_BTN_GM_3 + BTN_STEP + 14
+Y_BTN_GM_4 = Y_BTN_GM_3 + BTN_STEP
+Y_BTN_NEW = Y_BTN_GM_4 + BTN_STEP + 14
 Y_FOOTER = Y_BTN_NEW + NEW_GAME_H + 16
 
 SIDEBAR_BOTTOM = Y_FOOTER + 28
@@ -91,6 +93,7 @@ ACTION_MODES = [MODE_MOVE, MODE_SPECIAL]
 GM_HVH = "HVH"
 GM_AI_RUNNER = "AI_RUNNER"
 GM_AI_CATCHER = "AI_CATCHER"
+GM_AI_RUNNER_RL = "AI_RUNNER_RL"
 
 
 @dataclass
@@ -200,6 +203,7 @@ class App:
             (Y_BTN_GM_1, "Human vs. Human", f"gm:{GM_HVH}"),
             (Y_BTN_GM_2, "Human catcher (AI runner)", f"gm:{GM_AI_RUNNER}"),
             (Y_BTN_GM_3, "Human runner (AI catcher)", f"gm:{GM_AI_CATCHER}"),
+            (Y_BTN_GM_4, "Human catcher (RL runner)", f"gm:{GM_AI_RUNNER_RL}"),
         ]
         for y, label, key in gm_entries:
             buttons.append(Button(
@@ -221,7 +225,7 @@ class App:
         return pygame.Rect(gx + cell[0] * CELL, gy + cell[1] * CELL, CELL, CELL)
 
     def _ai_role(self) -> Optional[str]:
-        if self.game_mode == GM_AI_RUNNER:
+        if self.game_mode in (GM_AI_RUNNER, GM_AI_RUNNER_RL):
             return "runner"
         if self.game_mode == GM_AI_CATCHER:
             return "catcher"
@@ -246,7 +250,16 @@ class App:
         if pygame.time.get_ticks() < self.ai_pending_at:
             return
         if self.state.current_agent == "runner":
-            action = runner_policy(self.state, self.rng)
+            if self.game_mode == GM_AI_RUNNER_RL:
+                try:
+                    action = rl_runner_policy(self.state, self.rng)
+                except Exception as e:
+                    print(f"[pygame_app] RL runner failed: {e}\nFalling back to HVH.")
+                    self.game_mode = GM_HVH
+                    self.ai_pending_at = None
+                    return
+            else:
+                action = runner_policy(self.state, self.rng)
         else:
             action = catcher_policy(self.state, self.rng)
         new_state, *_ = engine.step(self.state, action)

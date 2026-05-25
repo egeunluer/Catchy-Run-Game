@@ -90,6 +90,20 @@ python -m catcher_vs_runner.balance
 
 Runs the bundled heuristic agents against each other and reports win rates with a 95% CI. Use it as a balance sanity-check whenever you change game parameters.
 
+## RL training
+
+The `rl_agent/` package wraps the engine for training. The engine's own reward is sparse — `±1` on termination, `0` otherwise — so `rl_agent/reward_shaping.py` adds per-step shaping signals on top of it for the **runner** trainee only:
+
+- capture bonus per special collected,
+- alive bonus,
+- catcher-distance penalty (heavy when in danger and not retreating, light otherwise),
+- projectile threat penalty,
+- attraction toward the two nearest *safe* uncaptured specials,
+- sprint-waste penalty,
+- urgency penalty: `-URGENCY_COEFF · (SPECIAL_MAJORITY − captured) · (turn / TURN_LIMIT)`, which gives the runner a growing nudge toward the 4-capture win threshold as the clock runs down, and disengages once that threshold is reached.
+
+All magnitudes are tuned so the engine's terminal `±1` still dominates the win/lose verdict. See `rl_agent/environment_explanations/reward_shaping.md` for the full component-by-component derivation and the calibration math.
+
 ## Project layout
 
 ```
@@ -102,6 +116,16 @@ catcher_vs_runner/
   render/
     pygame_app.py      pygame renderer + click handlers.
   main.py              Entry point.
+rl_agent/
+  environment.py       Gymnasium-style wrapper around the engine.
+  reward_shaping.py    Per-step shaping signals layered on the engine reward.
+  model.py             Policy / value network construction.
+  custom_cnn.py        CNN feature extractor for the 9-channel observation.
+  opponents.py         Opponent providers used during training.
+  evaluation.py        Evaluation harness for trained policies.
+  environment_explanations/
+    reward_shaping.md      Deep doc for reward_shaping.py.
+    opponent_structure.md  Deep doc for opponents.py.
 tests/
   test_engine.py
 ```

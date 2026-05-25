@@ -1,16 +1,18 @@
-from grid.catcher_vs_runner.engine import Agent, GameState
+from grid.catcher_vs_runner.engine import Agent, GameState, SPECIAL_MAJORITY, TURN_LIMIT
 
 
 class RewardShaper:
-    CAPTURE_BONUS = 0.1
+    CAPTURE_BONUS = 0.2
     ALIVE_BONUS = 0.005
-    CATCHER_DISTANCE_COEFF = 0.2
-    PROJECTILE_THREAT_COEFF = 0.15
-    ATTRACTION_NEAREST = 0.02
+    CATCHER_DISTANCE_COEFF = 0.30
+    CATCHER_PROXIMITY_COEFF = 0.03
+    PROJECTILE_THREAT_COEFF = 0.25
+    ATTRACTION_NEAREST = 0.03
     ATTRACTION_SECOND_NEAREST = 0.01
     SPRINT_WASTE_PENALTY = 0.02
+    URGENCY_COEFF = 0.005
     DANGER_RADIUS = 2
-    SAFE_ZONE_THRESHOLD = 2
+    SAFE_ZONE_THRESHOLD = 3
 
     def __init__(self, trainee_role: Agent):
         self.trainee_role = trainee_role
@@ -23,9 +25,17 @@ class RewardShaper:
         newly_captured = len(curr.captured_squares) - len(prev.captured_squares)
         return self.CAPTURE_BONUS * newly_captured
 
-    def _catcher_distance_penalty(self, curr: GameState) -> float:
-        dist = self._cheb(curr.runner_pos, curr.catcher_pos)
-        return -self.CATCHER_DISTANCE_COEFF / max(1, dist)
+    def _catcher_distance_rewarding(self, curr: GameState, prev: GameState) -> float:
+        runner_move_dist = self._cheb(curr.runner_pos, prev.catcher_pos)
+        delta_dist = runner_move_dist - self._cheb(prev.runner_pos, prev.catcher_pos)
+        current_dist = self._cheb(curr.runner_pos, curr.catcher_pos)
+        if current_dist <= self.DANGER_RADIUS:
+            if delta_dist <= 0:
+                return -self.CATCHER_DISTANCE_COEFF / current_dist
+            return -self.CATCHER_PROXIMITY_COEFF / current_dist
+        else:
+            return -self.CATCHER_PROXIMITY_COEFF / current_dist
+
 
     def _projectile_threat_penalty(self, curr: GameState) -> float:
         penalty = 0.0
@@ -58,13 +68,21 @@ class RewardShaper:
             return -self.SPRINT_WASTE_PENALTY
         return 0.0
 
+    def _urgency_penalty(self, curr: GameState) -> float:
+        shortfall = SPECIAL_MAJORITY - len(curr.captured_squares)
+        if shortfall <= 0:
+            return 0.0
+        turns_elapsed = curr.turn / TURN_LIMIT
+        return -self.URGENCY_COEFF * shortfall * turns_elapsed
+
     def shape(self, prev_state: GameState, curr_state: GameState, base_reward: float) -> float:
-        if self.trainee_role != "runner":
+        if self.trainee_role != "runner" or curr_state.terminated:
             return base_reward
         return (base_reward
                 + self._capture_bonus(prev_state, curr_state)
                 + self.ALIVE_BONUS
-                + self._catcher_distance_penalty(curr_state)
+                + self._catcher_distance_rewarding(curr_state, prev_state)
                 + self._projectile_threat_penalty(curr_state)
                 + self._special_attraction(curr_state)
-                + self._sprint_waste_penalty(prev_state, curr_state))
+                + self._sprint_waste_penalty(prev_state, curr_state)
+                + self._urgency_penalty(curr_state))

@@ -40,5 +40,5 @@ def evaluate(trainee_role: Agent, model_path: str, n_episodes: int = 400, base_s
     print(f"Mean Lengths: {mean_lengths:.2f}")
 
 if __name__ == "__main__":
-      evaluate(trainee_role= "runner",model_path="catchy_run_runner_stage0_v1", n_episodes=400,)
+      evaluate(trainee_role= "runner",model_path="catchy_run_runner_stage0_v3", n_episodes=400,)
 
