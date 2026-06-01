@@ -1,4 +1,4 @@
-# Catcher vs. Runner
+# Catchy Run - And The DRL Agents
 
 A two-agent adversarial game on a 7×7 grid. The runner has to capture
 enough special squares while staying out of the catcher's way — or the
