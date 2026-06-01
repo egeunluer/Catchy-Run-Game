@@ -21,7 +21,7 @@ Tick boxes as you progress:
 - [ ] **Stage 2** — train against the latest runner snapshot
 - [ ] **Stage 3** — train against a pool of past runner snapshots + heuristic
 
-The catcher has no Stage 0: its objective (catch the runner / stall to timeout) gives dense enough feedback that learning against the heuristic runner from scratch works.
+The catcher has no Stage 0: its objective (catch the runner / stall to timeout) gives dense enough feedback that learning against the heuristic runner from scratch works. The catcher does, however, get its own lightweight reward shaper (`CatcherRewardShaper`) to scaffold projectile tactics — the sparse signal would otherwise teach pure stepping (see `rl_agent/environment_explanations/catcher_reward_shaping.md`).
 
 ---
 
@@ -44,7 +44,7 @@ Key design choices:
 - **Two networks.** One model per role. No shared weights, no role channel.
 - **Algorithm:** `MaskablePPO` from `sb3-contrib` — handles action masking via `info["action_mask"]`.
 - **Observation:** `(9, 7, 7)` — the engine's 9 channels. Each model sees only its own role's perspective.
-- **Reward:** sparse ±1 on termination, sign flipped to the trainee's role. The runner additionally gets per-step shaping from `rl_agent/reward_shaping.py` — 8 components (capture bonus, alive bonus, catcher-distance, projectile threat, special-attraction, sprint-waste, urgency, plus the base engine reward). All magnitudes are tuned so the engine's terminal ±1 still dominates. The catcher is unshaped. See `rl_agent/environment_explanations/reward_shaping.md` for the per-component derivation.
+- **Reward:** sparse ±1 on termination, sign flipped to the trainee's role. Both roles additionally get per-step shaping from `rl_agent/reward_shaping.py`, with separate subclasses (`RunnerRewardShaper`, `CatcherRewardShaper`) extending a shared `RewardShaper` base. The runner shaper has 9 components (capture bonus, alive bonus, catcher-distance, projectile threat, special-attraction, sprint-waste, urgency, unsafe-capture, plus the base engine reward). The catcher shaper has 4 components (capture-block, distance-closure, bullet-coverage, plus the base engine reward), intentionally lighter — its job is to scaffold projectile tactics that a sparse catcher would otherwise skip. All magnitudes are tuned so the engine's terminal ±1 still dominates. See `rl_agent/environment_explanations/reward_shaping.md` and `catcher_reward_shaping.md` for per-component derivations.
 - **Opponent strategy:** opponent plays inline inside `env.step`, so SB3 sees a normal single-agent env.
 
 ---
@@ -120,16 +120,15 @@ train(load_from="catchy_run_runner_stage0",
       ent_coef=0.005)   # lower entropy so it refines instead of thrashing
 ```
 
-**Catcher** — from scratch against the heuristic runner:
+**Catcher** — from scratch against the heuristic runner. `make_env` in `model.py` already branches by `trainee_role` and binds `CatcherRewardShaper` automatically via `environment.py`:
 
 ```python
-def make_env():
-    env = CatchyRunEnv(trainee_role="catcher", opponent_policy=heuristic_opponent)
-    env = ActionMasker(env, mask_fn)
-    return env
-
-train(save_to="catchy_run_catcher_stage1", tb_log_name="catcher_stage1")
+train(trainee_role="catcher",
+      save_to="catchy_run_catcher_stage1",
+      tb_log_name="catcher_stage1")
 ```
+
+Catcher shaping (capture-block, distance-closure, bullet-coverage) is light by design — it nudges the policy toward projectile use without overriding the terminal verdict. See `rl_agent/environment_explanations/catcher_reward_shaping.md` before tuning coefficients.
 
 The two trainings are independent — run them sequentially or in parallel processes.
 
@@ -295,10 +294,11 @@ Don't tune anything before a stage run has clearly failed.
 
 | File | Purpose |
 |---|---|
-| `rl_agent/environment.py` | The Gym env. `trainee_role` fixed at construction. |
+| `rl_agent/environment.py` | The Gym env. `trainee_role` fixed at construction; binds the right `*RewardShaper`. |
+| `rl_agent/reward_shaping.py` | `RewardShaper` base + `RunnerRewardShaper` and `CatcherRewardShaper` subclasses. |
 | `rl_agent/opponents.py` | Opponent callables. Heuristic now; snapshot loader for Stage 2. |
 | `rl_agent/custom_cnn.py` | CNN feature extractor + `policy_kwargs`. Sized for 9×7×7. |
-| `rl_agent/model.py` | Training entry point. |
+| `rl_agent/model.py` | Training entry point. Role-aware `make_env`, checkpoint naming. |
 | `catcher_vs_runner/engine.py` | Pure game logic. Do not modify for RL needs. |
 | `tb_logs/` | TensorBoard event files (created on first run). |
 | `catchy_run_runner_stageN.zip` | Runner model checkpoints. |

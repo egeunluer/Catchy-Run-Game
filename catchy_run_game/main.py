@@ -2,7 +2,7 @@
 
 Run via:
 
-    python -m catcher_vs_runner.main
+    python -m catchy_run_game.main
 
 or double-click this file (assuming `.py` is associated with Python and
 `pygame` + `numpy` are installed in the active environment).

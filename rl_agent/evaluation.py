@@ -1,44 +1,60 @@
 import numpy as np
 from sb3_contrib import MaskablePPO
 
-from grid.rl_agent.environment import CatchyRunEnv
-from grid.rl_agent.opponents import heuristic_opponent
-from grid.catcher_vs_runner.engine import Agent
+from catchy_run.rl_agent.environment import CatchyRunEnv
+from catchy_run.rl_agent.opponents import heuristic_opponent
+from catchy_run.catchy_run_game.engine import Agent, TURN_LIMIT
 
 def evaluate(trainee_role: Agent, model_path: str, n_episodes: int = 400, base_seed: int = 0, opponent_policy = heuristic_opponent):
     env = CatchyRunEnv(trainee_role=trainee_role, opponent_policy=opponent_policy)
     model = MaskablePPO.load(model_path)
 
-    wins, losses, lengths = 0, 0, []
+    wins, losses = 0, 0
+    lengths = []
     captures_per_episode = []
+    active_kills = 0
+    kill_turns = []
 
     for ep in range(n_episodes):
         obs, info = env.reset(seed=base_seed + ep)
         terminated = False
-        total_reward = 0.0
         steps = 0
         while not terminated:
             mask = info["action_mask"]
             action, _ = model.predict(obs, action_masks=mask, deterministic=True)
             obs, reward, terminated, _, info = env.step(int(action))
-            total_reward += reward
             steps += 1
 
-        captures_per_episode.append(len(env.unwrapped.state.captured_squares))
-        if total_reward > 0:
-            wins +=1
+        end_state = env.unwrapped.state
+        captures_per_episode.append(len(end_state.captured_squares))
+        lengths.append(steps)
+        if end_state.winner == trainee_role:
+            wins += 1
+            if trainee_role == "catcher" and end_state.turn < TURN_LIMIT:
+                active_kills += 1
+                kill_turns.append(end_state.turn)
         else:
             losses += 1
-        lengths.append(steps)
 
     print(f"\nEvaluated {model_path} over {n_episodes} episodes\n")
     print("-" * 46)
     print(f"{'overall':<10}{wins:>6} Wins{n_episodes - wins:>8} Losses{wins / n_episodes:>11.1%}")
     mean_captures = np.mean(captures_per_episode) if captures_per_episode else 0.0
     mean_lengths = np.mean(lengths) if lengths else 0.0
-    print(f"Mean Captures: {mean_captures:.2f} / 7")
-    print(f"Mean Lengths: {mean_lengths:.2f}")
+
+    if trainee_role == "runner":
+        print(f"Mean Captures: {mean_captures:.2f} / 7")
+        print(f"Mean Lengths: {mean_lengths:.2f}")
+    else:
+        timeout_wins = wins - active_kills
+        mean_kill_turn = float(np.mean(kill_turns)) if kill_turns else 0.0
+        print(f"Active kills:   {active_kills:>6}  ({active_kills / n_episodes:>6.1%})")
+        print(f"Timeout wins:   {timeout_wins:>6}  ({timeout_wins / n_episodes:>6.1%})")
+        print(f"Mean kill turn (active kills only): {mean_kill_turn:.2f} / {TURN_LIMIT}")
+        print(f"Mean runner captures conceded: {mean_captures:.2f} / 7")
+        print(f"Mean Lengths: {mean_lengths:.2f}")
 
 if __name__ == "__main__":
-      evaluate(trainee_role= "runner",model_path="catchy_run_runner_stage0_v1_2", n_episodes=400,)
-
+      evaluate(trainee_role= "runner",model_path="catchy_run/trained_model_checkpoints/runner_models/catchy_run_runner_stage0_v1_4_1", n_episodes=400,)
+      # Catcher evaluation example:
+      # evaluate(trainee_role="catcher", model_path="catchy_run_catcher_stage1_v0", n_episodes=400)

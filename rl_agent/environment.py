@@ -2,8 +2,8 @@ from typing import Optional
 import numpy as np
 import gymnasium as gym
 from gymnasium.utils.env_checker import check_env
-from grid.catcher_vs_runner import engine as engine
-from grid.rl_agent.reward_shaping import RewardShaper
+from catchy_run.catchy_run_game import engine as engine
+from catchy_run.rl_agent.reward_shaping import RunnerRewardShaper, CatcherRewardShaper
 
 class CatchyRunEnv(gym.Env):
 
@@ -30,7 +30,10 @@ class CatchyRunEnv(gym.Env):
         self.action_space = gym.spaces.Discrete(16)
         self.state: Optional[engine.GameState] = None
         self.trainee_role: engine.Agent = trainee_role
-        self.reward_shaper = RewardShaper(trainee_role)
+        if trainee_role == "runner":
+            self.reward_shaper = RunnerRewardShaper()
+        else:
+            self.reward_shaper = CatcherRewardShaper()
 
     #Extract the observation from the engine + add the perspective channel at the start
     def _obs(self) -> np.ndarray:

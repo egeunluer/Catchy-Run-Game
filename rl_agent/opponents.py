@@ -1,4 +1,4 @@
-from grid.catcher_vs_runner.agents import heuristic
+from catchy_run.catchy_run_game.agents import heuristic
 
 def heuristic_opponent(state):
     if state.current_agent == "runner":

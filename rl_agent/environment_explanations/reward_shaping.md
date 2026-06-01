@@ -37,6 +37,7 @@ edit them:
 | `ATTRACTION_SECOND_NEAREST` | 0.005 | Numerator of the second-closest-safe-special attraction term.                                                       |
 | `SPRINT_WASTE_PENALTY`      | 0.02  | Flat penalty when the runner sprints while already in the safe zone.                                                |
 | `URGENCY_COEFF`             | 0.005 | Per-step penalty per missing special, scaled by fraction of the episode elapsed (zero once the runner reaches `SPECIAL_MAJORITY`). |
+| `UNSAFE_CAPTURE_PENALTY`    | 0.25  | Flat penalty when the runner captures a special at Chebyshev ≤ 1 from where the catcher stood at the start of the half-turn.       |
 | `DANGER_RADIUS`             | 2     | Specials within this Chebyshev distance of the catcher are unsafe; also gates the heavy/light split of the catcher term. |
 | `SAFE_ZONE_THRESHOLD`       | 3     | Runner is in the safe zone iff `cheb(runner, catcher) > 3` (used only by sprint waste).                              |
 
@@ -60,6 +61,7 @@ shaped = base
        + ATTRACTION_SECOND_NEAREST/ max(1, cheb(runner, safe₂))       # attraction (2nd closest)
        − SPRINT_WASTE_PENALTY     if sprint_used and in_safe_zone     # sprint waste
        − URGENCY_COEFF · shortfall · (curr.turn / TURN_LIMIT)         # urgency (shortfall = max(0, SPECIAL_MAJORITY − |captured|))
+       − UNSAFE_CAPTURE_PENALTY   if newly_captured > 0 and cheb(curr.runner_pos, prev.catcher_pos) ≤ 1   # unsafe capture
 
 where catcher_term =
        −CATCHER_DISTANCE_COEFF  / cheb(runner, catcher)   if cheb(runner, catcher) ≤ DANGER_RADIUS
@@ -94,7 +96,45 @@ attraction, light catcher branch) so the runner doesn't pass up a free
 capture during normal play. Note that it does **not** outweigh the heavy
 catcher branch (`−0.30` at cheb 1) — capturing a special that sits adjacent
 to the catcher yields a net negative shaped reward by design, on the
-assumption that the catcher would intercept on arrival anyway.
+assumption that the catcher would intercept on arrival anyway. The unsafe
+capture penalty (see below) reinforces this for the exact `cheb ≤ 1` case
+by neutralizing the capture bonus directly, so the heavy distance branch no
+longer has to do the work alone on noisy transitions.
+
+### Unsafe capture penalty — `_unsafe_capture_penalty(prev, curr)`
+
+```
+newly_captured = |curr.captured_squares| − |prev.captured_squares|
+penalty        = −UNSAFE_CAPTURE_PENALTY   if newly_captured > 0
+                                            and cheb(curr.runner_pos, prev.catcher_pos) ≤ 1
+                 0                           otherwise
+```
+
+Fires when the runner captures a special that sits adjacent to where the
+catcher was *at the start of the half-turn*. The distance is measured
+against `prev.catcher_pos`, not `curr.catcher_pos`, because the danger that
+matters is the danger at decision time: by the time `shape()` runs the
+catcher has already replied, and `curr.catcher_pos` is confounded with the
+catcher's policy (it may have stepped closer, shot in another direction, or
+been killed mid-bullet — none of those facts should change how we score the
+runner's decision).
+
+The `cheb ≤ 1` threshold is the right cut-off. In any non-terminal state
+`cheb(runner, catcher) ≥ 1` — a `0` means the catcher already caught the
+runner and `shape()` short-circuits — so this fires exactly when the special
+the runner just landed on is one step (cardinal or diagonal) from the
+catcher's pre-reply position, i.e. inside the catcher's one-turn kill range.
+
+Magnitude (`−0.25`) is chosen to **neutralize** the `+0.24` capture bonus
+rather than dominate it. At a `cheb = 1` unsafe capture the immediate shaped
+reward is roughly `+0.24` (capture) `− 0.30` (heavy catcher branch)
+`+ 0.005` (alive) `− 0.25` (unsafe capture) `≈ −0.305`, with the terminal
+`−1` arriving on the next half-turn whenever the catcher actually closes the
+kill. The point is that the *intrinsic* incentive to grab the special is
+gone — the heavy distance branch then makes the signal cleanly negative,
+and the terminal reward does the rest. We deliberately keep this penalty
+below the `+1` terminal so a *game-winning* unsafe capture (the runner's 4th
+special) is still favored when the terminal reward will pay out.
 
 ### Alive bonus — flat `+ALIVE_BONUS`
 
@@ -252,7 +292,11 @@ A few worst-case sums to keep the relative scales straight:
   branch, `−0.30`), one bullet's sampled cell adjacent to the runner
   (`−0.25`), shortfall = 4 at turn 38 (urgency `≈ −0.019`), no captures,
   no safe specials, no waste, alive bonus (`+0.005`): shaping ≈ `−0.56`.
-  Still above the `−1` terminal as a single-step signal.
+  Still above the `−1` terminal as a single-step signal. The unsafe-capture
+  penalty (`−0.25`) can only fire when `newly_captured > 0`, so it never
+  stacks with the "no captures" floor — its worst-case stack is with the
+  capture bonus, where it lands a net `≈ −0.305` on a cheb-1 unsafe grab
+  (capture `+0.24`, heavy catcher `−0.30`, alive `+0.005`, unsafe `−0.25`).
 - **Per-step ceiling.** Captured a special (`+0.24`) on a transition where
   the runner is on top of one safe special (`+0.01`) with another at
   distance 1 (`+0.005`), catcher far in the safe zone (light branch

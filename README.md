@@ -8,7 +8,7 @@ catcher will close the distance and end them, by step or by bullet.
 
 ```bash
 pip install -e .
-python -m catcher_vs_runner
+python -m catchy_run_game
 ```
 
 ### Double-click launch (macOS)
@@ -85,14 +85,16 @@ Rewards: `±1.0` to the winner / loser on termination, `0.0` on every other step
 ## Heuristic baseline
 
 ```bash
-python -m catcher_vs_runner.balance
+python -m catchy_run_game.balance
 ```
 
 Runs the bundled heuristic agents against each other and reports win rates with a 95% CI. Use it as a balance sanity-check whenever you change game parameters.
 
 ## RL training
 
-The `rl_agent/` package wraps the engine for training. The engine's own reward is sparse — `±1` on termination, `0` otherwise — so `rl_agent/reward_shaping.py` adds per-step shaping signals on top of it for the **runner** trainee only:
+The `rl_agent/` package wraps the engine for training. The engine's own reward is sparse — `±1` on termination, `0` otherwise — so `rl_agent/reward_shaping.py` adds per-step shaping signals on top of it. A shared `RewardShaper` base class owns common helpers; `RunnerRewardShaper` and `CatcherRewardShaper` subclass it with role-specific signals, and `environment.py` picks the right one at construction time.
+
+The **runner** shaper layers on:
 
 - capture bonus per special collected,
 - alive bonus,
@@ -100,9 +102,16 @@ The `rl_agent/` package wraps the engine for training. The engine's own reward i
 - projectile threat penalty,
 - attraction toward the two nearest *safe* uncaptured specials,
 - sprint-waste penalty,
-- urgency penalty: `-URGENCY_COEFF · (SPECIAL_MAJORITY − captured) · (turn / TURN_LIMIT)`, which gives the runner a growing nudge toward the 4-capture win threshold as the clock runs down, and disengages once that threshold is reached.
+- urgency penalty: `-URGENCY_COEFF · (SPECIAL_MAJORITY − captured) · (turn / TURN_LIMIT)`, which gives the runner a growing nudge toward the 4-capture win threshold as the clock runs down, and disengages once that threshold is reached,
+- unsafe-capture penalty: flat `-UNSAFE_CAPTURE_PENALTY` when the runner captures a special with `cheb(runner, prev.catcher_pos) ≤ 1`, sized to neutralize the capture bonus so the existing distance penalty dominates the signal on unsafe grabs.
 
-All magnitudes are tuned so the engine's terminal `±1` still dominates the win/lose verdict. See `rl_agent/environment_explanations/reward_shaping.md` for the full component-by-component derivation and the calibration math.
+The **catcher** shaper is deliberately lighter — its job is to scaffold projectile tactics that a sparse catcher would otherwise skip (random shots usually miss, so sparse expectation marks them as wasted turns). Three components:
+
+- capture-block penalty per special the runner just grabbed (direct anti-progress),
+- small distance-closure bonus (`+COEFF / cheb(runner, catcher)`),
+- bullet-coverage bonus: per in-flight bullet, score `+COEFF / max(1, min(d₁, d₂))` against the runner's current position, summed over the `BULLET_COVERAGE_CAP` closest bullets to prevent spam inflation.
+
+All magnitudes are tuned so the engine's terminal `±1` still dominates the win/lose verdict. See `rl_agent/environment_explanations/reward_shaping.md` and `catcher_reward_shaping.md` for the full component-by-component derivations.
 
 ## Project layout
 
@@ -118,14 +127,16 @@ catcher_vs_runner/
   main.py              Entry point.
 rl_agent/
   environment.py       Gymnasium-style wrapper around the engine.
-  reward_shaping.py    Per-step shaping signals layered on the engine reward.
-  model.py             Policy / value network construction.
+  reward_shaping.py    RewardShaper base + RunnerRewardShaper / CatcherRewardShaper subclasses.
+  model.py             Policy / value network construction. Role-aware training entry point.
   custom_cnn.py        CNN feature extractor for the 9-channel observation.
   opponents.py         Opponent providers used during training.
-  evaluation.py        Evaluation harness for trained policies.
+  evaluation.py        Evaluation harness for trained policies (runner and catcher metrics).
+  trace_rewards.py     Per-component trace tool for either shaper.
   environment_explanations/
-    reward_shaping.md      Deep doc for reward_shaping.py.
-    opponent_structure.md  Deep doc for opponents.py.
+    reward_shaping.md          Deep doc for RunnerRewardShaper.
+    catcher_reward_shaping.md  Deep doc for CatcherRewardShaper.
+    opponent_structure.md      Deep doc for opponents.py.
 tests/
   test_engine.py
 ```

@@ -3,35 +3,39 @@ from sb3_contrib.common.wrappers import ActionMasker
 from sb3_contrib.common.maskable.buffers import MaskableRolloutBuffer
 from stable_baselines3.common.callbacks import CheckpointCallback
 
-from grid.rl_agent.environment import CatchyRunEnv
-from grid.rl_agent.opponents import heuristic_opponent
-from grid.rl_agent.custom_cnn import policy_kwargs
-from grid.catcher_vs_runner.engine import Agent
+from catchy_run.rl_agent.environment import CatchyRunEnv
+from catchy_run.rl_agent.opponents import heuristic_opponent
+from catchy_run.rl_agent.custom_cnn import policy_kwargs
+from catchy_run.catchy_run_game.engine import Agent
 
 def mask_fn(env: CatchyRunEnv):
     """ActionMasker will call this on every step to extract the current action mask."""
     return env.unwrapped._info()["action_mask"]
 
 def make_env(trainee_role: Agent):
-    env = CatchyRunEnv(trainee_role= trainee_role)
-    env.set_opponent_pool([env._default_opponent, heuristic_opponent], weights=[0.3, 0.7])
+    if trainee_role == "runner":
+        env = CatchyRunEnv(trainee_role=trainee_role)
+        env.set_opponent_pool([env._default_opponent, heuristic_opponent], weights=[0.1, 0.9])
+    else:
+        env = CatchyRunEnv(trainee_role=trainee_role, opponent_policy=heuristic_opponent)
     env = ActionMasker(env, mask_fn)
     return env
-
-checkpoint_callback = CheckpointCallback(
-    save_freq=100_000,
-    save_path="./checkpoints/",
-    name_prefix="catchy_run_runner"
-)
 
 def train(trainee_role: Agent,
           total_timesteps: int = 200_000,
           load_from: str | None = None,
-          save_to: str = "catchy_run_runner_stage0_v0",
-          tb_log_name: str = "runner_stage0_v0",
+          save_to: str | None = None,
+          tb_log_name: str | None = None,
           ent_coef: float = 0.01,
           learning_rate : float = 3e-4
           ):
+    save_to = save_to or f"catchy_run_{trainee_role}_stage0_v0"
+    tb_log_name = tb_log_name or f"{trainee_role}_stage0_v0"
+    checkpoint_callback = CheckpointCallback(
+        save_freq=100_000,
+        save_path="./checkpoints/",
+        name_prefix=f"catchy_run_{trainee_role}"
+    )
     env = make_env(trainee_role)
     if load_from is not None:
         model = MaskablePPO.load(load_from, env=env)
@@ -72,4 +76,6 @@ def train(trainee_role: Agent,
 
 if __name__ == "__main__":
     #Change the signature of this train method to continue from a trained model
-    train(load_from= "catchy_run_runner_stage0_v1_1",total_timesteps= 300000,trainee_role="runner", save_to="catchy_run_runner_stage0_v1_2", tb_log_name="runner_stage0_v1_2", ent_coef=0.01, learning_rate=5e-5)
+    train(load_from= "catchy_run_runner_stage0_v1_4_0",total_timesteps= 200000,trainee_role="runner", save_to="catchy_run_runner_stage0_v1_4_1", tb_log_name="runner_stage0_v1_4_1", ent_coef=0.01, learning_rate=5e-5)
+    # Catcher Stage 1 example (fresh train against the heuristic runner):
+    # train(trainee_role="catcher", total_timesteps=200_000, save_to="catchy_run_catcher_stage1_v0", tb_log_name="catcher_stage1_v0")

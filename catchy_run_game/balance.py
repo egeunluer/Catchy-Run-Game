@@ -7,7 +7,7 @@ handing off to DRL training.
 
 Run:
 
-    python -m catcher_vs_runner.balance --games 200 --seed 0
+    python -m catchy_run_game.balance --games 200 --seed 0
 """
 
 from __future__ import annotations

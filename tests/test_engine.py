@@ -1,4 +1,4 @@
-"""Tests for catcher_vs_runner.engine.
+"""Tests for catchy_run_game.engine.
 
 Covers the engine contract: legality, mask consistency, win conditions,
 purity / determinism, and the observation shape & perspective behavior.
