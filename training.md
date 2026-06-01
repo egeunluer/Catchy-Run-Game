@@ -11,7 +11,7 @@ Training escalates in opponent strength: random → heuristic → cross-play →
 Tick boxes as you progress:
 
 ### Runner
-- [ ] **Stage 0** — explore the grid against a random opponent; learn to capture squares
+- [ ] **Stage 0** — explore the grid against a 70% random / 30% heuristic catcher mix; learn to capture squares under light pressure
 - [ ] **Stage 1** — train against the bundled heuristic catcher
 - [ ] **Stage 2** — train against the latest catcher snapshot
 - [ ] **Stage 3** — train against a pool of past catcher snapshots + heuristic
@@ -44,29 +44,33 @@ Key design choices:
 - **Two networks.** One model per role. No shared weights, no role channel.
 - **Algorithm:** `MaskablePPO` from `sb3-contrib` — handles action masking via `info["action_mask"]`.
 - **Observation:** `(9, 7, 7)` — the engine's 9 channels. Each model sees only its own role's perspective.
-- **Reward:** sparse ±1 on termination, sign flipped to the trainee's role. Runner additionally gets `+0.05 * newly_captured` shaping (`environment.py:_shape_reward`).
+- **Reward:** sparse ±1 on termination, sign flipped to the trainee's role. The runner additionally gets per-step shaping from `rl_agent/reward_shaping.py` — 8 components (capture bonus, alive bonus, catcher-distance, projectile threat, special-attraction, sprint-waste, urgency, plus the base engine reward). All magnitudes are tuned so the engine's terminal ±1 still dominates. The catcher is unshaped. See `rl_agent/environment_explanations/reward_shaping.md` for the per-component derivation.
 - **Opponent strategy:** opponent plays inline inside `env.step`, so SB3 sees a normal single-agent env.
 
 ---
 
-## Stage 0 — Runner vs. random (exploration)
+## Stage 0 — Runner vs. mixed pool (exploration)
 
-**Goal:** the runner learns the *objective*. Against a near-passive opponent the only meaningful gradient comes from the `+0.05` capture shaping and the `+1` terminal for sweeping all 7 special squares. By the end of Stage 0 the runner should reliably head for special squares.
+**Goal:** the runner learns the *objective* under light catcher pressure. The 70% random episodes give low-stakes opportunities to stumble onto specials and learn the capture loop; the 30% heuristic episodes apply just enough pressure that the policy can't ignore the catcher and over-fit to a passive opponent. By the end of Stage 0 the runner should reliably head for special squares and capture (not just hover adjacent to) them.
 
 **Why no catcher version:** the catcher's reward density doesn't need this scaffolding — it can learn directly vs. the heuristic runner.
 
 ### How it works
 
-`CatchyRunEnv.__init__` falls back to `_default_opponent` (random legal action) when no `opponent_policy` is passed. So the entire setup is:
+The env exposes a weighted opponent pool via `set_opponent_pool(opponents, weights)`. The pool is sampled **per episode** in `reset()`, so the opponent is fixed for the duration of an episode — 30% of *episodes* are heuristic, not 30% of *turns within an episode*.
 
 ```python
-def make_env():
-    env = CatchyRunEnv(trainee_role="runner")    # opponent defaults to random
+def make_env(trainee_role: Agent):
+    env = CatchyRunEnv(trainee_role=trainee_role)
+    env.set_opponent_pool(
+        [env._default_opponent, heuristic_opponent],
+        weights=[0.7, 0.3],
+    )
     env = ActionMasker(env, mask_fn)
     return env
 ```
 
-Train fresh — no `load_from`.
+Train fresh — no `load_from`. Any prior checkpoint was fit to a different shaping/opponent regime and would carry over a biased value function.
 
 ### Run
 
@@ -74,18 +78,21 @@ Train fresh — no `load_from`.
 python -m rl_agent.model
 ```
 
-Budget: 200k steps.
+Budget: 300k steps. Extend to 500k–1M if the capture rate hasn't crossed the 4-square win threshold.
 
 ### Move-on criteria
 
-- [ ] Runner captures all 7 special squares in the majority of episodes
-- [ ] Win rate vs. random catcher is near 100%
+- [ ] Runner captures **≥4 special squares** in the majority of episodes (the on-timeout win threshold)
+- [ ] Win rate against the 70/30 pool stabilizes at **≥70%**
 - [ ] Episode length trends *down* over training — the runner is finishing faster, not stalling
+- [ ] Behavioral check: run `trace_rewards.py` against the checkpoint and confirm the runner is *capturing* specials (capture component fires regularly), not loitering adjacent to them to farm the attraction term
 
 ### Common failures
 
-- `ep_rew_mean` stuck near 0 → the runner isn't even stumbling onto special squares. Bump shaping to `0.2` per capture.
-- Entropy stuck high (~`ln(n_legal)`) with flat losses → no signal is reaching the policy. Re-check `_shape_reward` and the mask threading before extending the run.
+- **Capture rate plateaus at ~3** with episode length near the 40-turn cap → policy is exploiting shaping (attraction farming or alive-bonus farming). Inspect with `trace_rewards.py` and rebalance `ATTRACTION_NEAREST` vs `CAPTURE_BONUS` in `reward_shaping.py`.
+- **`ep_rew_mean` stuck near 0** → the runner isn't finding specials. Drop the heuristic share to 10% temporarily so the runner sees more low-pressure episodes; once captures appear, restore 30%.
+- **Capture rate near 0 with very short episodes** → the heuristic catcher is killing the runner before it learns. Same fix: drop heuristic share to 10%, retrain from scratch.
+- **Entropy stuck high (~`ln(n_legal)`) with flat losses** → no signal is reaching the policy. Re-check `_shape_reward` and the mask threading before extending the run.
 
 ### Output
 

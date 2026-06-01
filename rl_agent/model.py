@@ -1,5 +1,6 @@
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
+from sb3_contrib.common.maskable.buffers import MaskableRolloutBuffer
 from stable_baselines3.common.callbacks import CheckpointCallback
 
 from grid.rl_agent.environment import CatchyRunEnv
@@ -13,6 +14,7 @@ def mask_fn(env: CatchyRunEnv):
 
 def make_env(trainee_role: Agent):
     env = CatchyRunEnv(trainee_role= trainee_role)
+    env.set_opponent_pool([env._default_opponent, heuristic_opponent], weights=[0.3, 0.7])
     env = ActionMasker(env, mask_fn)
     return env
 
@@ -27,12 +29,26 @@ def train(trainee_role: Agent,
           load_from: str | None = None,
           save_to: str = "catchy_run_runner_stage0_v0",
           tb_log_name: str = "runner_stage0_v0",
-          ent_coef: float = 0.01
+          ent_coef: float = 0.01,
+          learning_rate : float = 3e-4
           ):
     env = make_env(trainee_role)
     if load_from is not None:
         model = MaskablePPO.load(load_from, env=env)
         model.ent_coef = ent_coef
+        model.learning_rate = learning_rate
+        model._setup_lr_schedule()
+        model.n_steps = 4096
+        model.batch_size = 256
+        model.rollout_buffer = MaskableRolloutBuffer(
+            model.n_steps,
+            model.observation_space,
+            model.action_space,
+            device=model.device,
+            gamma=model.gamma,
+            gae_lambda=model.gae_lambda,
+            n_envs=model.n_envs,
+        )
     else:
         model = MaskablePPO(
             policy="CnnPolicy",
@@ -56,4 +72,4 @@ def train(trainee_role: Agent,
 
 if __name__ == "__main__":
     #Change the signature of this train method to continue from a trained model
-    train(load_from= "catchy_run_runner_stage0_v2",total_timesteps= 200000,trainee_role="runner", save_to="catchy_run_runner_stage0_v3", tb_log_name="runner_stage0_v3")
+    train(load_from= "catchy_run_runner_stage0_v1_1",total_timesteps= 300000,trainee_role="runner", save_to="catchy_run_runner_stage0_v1_2", tb_log_name="runner_stage0_v1_2", ent_coef=0.01, learning_rate=5e-5)

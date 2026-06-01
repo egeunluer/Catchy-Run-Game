@@ -14,7 +14,7 @@ from .. import engine
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 _REPO_ROOT = _PACKAGE_ROOT.parent
-DEFAULT_MODEL_PATH = _REPO_ROOT / "catchy_run_runner_stage0_v3.zip"
+DEFAULT_MODEL_PATH = _REPO_ROOT / "catchy_run_runner_stage0_v1_2.zip"
 
 _model = None
 

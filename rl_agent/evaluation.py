@@ -5,7 +5,7 @@ from grid.rl_agent.environment import CatchyRunEnv
 from grid.rl_agent.opponents import heuristic_opponent
 from grid.catcher_vs_runner.engine import Agent
 
-def evaluate(trainee_role: Agent, model_path: str, n_episodes: int = 400, base_seed: int = 0, opponent_policy = None):
+def evaluate(trainee_role: Agent, model_path: str, n_episodes: int = 400, base_seed: int = 0, opponent_policy = heuristic_opponent):
     env = CatchyRunEnv(trainee_role=trainee_role, opponent_policy=opponent_policy)
     model = MaskablePPO.load(model_path)
 
@@ -40,5 +40,5 @@ def evaluate(trainee_role: Agent, model_path: str, n_episodes: int = 400, base_s
     print(f"Mean Lengths: {mean_lengths:.2f}")
 
 if __name__ == "__main__":
-      evaluate(trainee_role= "runner",model_path="catchy_run_runner_stage0_v3", n_episodes=400,)
+      evaluate(trainee_role= "runner",model_path="catchy_run_runner_stage0_v1_2", n_episodes=400,)
 

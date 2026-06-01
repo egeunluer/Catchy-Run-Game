@@ -28,13 +28,13 @@ edit them:
 
 | Attribute                   | Value | What it controls                                                                                                    |
 |-----------------------------|-------|---------------------------------------------------------------------------------------------------------------------|
-| `CAPTURE_BONUS`             | 0.2   | Reward per special-square captured this transition.                                                                 |
+| `CAPTURE_BONUS`             | 0.24  | Reward per special-square captured this transition.                                                                 |
 | `ALIVE_BONUS`               | 0.005 | Flat per-step bonus while the game is ongoing.                                                                      |
 | `CATCHER_DISTANCE_COEFF`    | 0.30  | Heavy-branch numerator: in danger and runner didn't move away from the catcher.                                     |
-| `CATCHER_PROXIMITY_COEFF`   | 0.03  | Light-branch numerator: in danger but moved away, or in the safe zone.                                              |
+| `CATCHER_PROXIMITY_COEFF`   | 0.02  | Light-branch numerator: in danger but moved away, or in the safe zone.                                              |
 | `PROJECTILE_THREAT_COEFF`   | 0.25  | Numerator of the per-projectile threat penalty.                                                                     |
-| `ATTRACTION_NEAREST`        | 0.03  | Numerator of the closest-safe-special attraction term.                                                              |
-| `ATTRACTION_SECOND_NEAREST` | 0.01  | Numerator of the second-closest-safe-special attraction term.                                                       |
+| `ATTRACTION_NEAREST`        | 0.01  | Numerator of the closest-safe-special attraction term.                                                              |
+| `ATTRACTION_SECOND_NEAREST` | 0.005 | Numerator of the second-closest-safe-special attraction term.                                                       |
 | `SPRINT_WASTE_PENALTY`      | 0.02  | Flat penalty when the runner sprints while already in the safe zone.                                                |
 | `URGENCY_COEFF`             | 0.005 | Per-step penalty per missing special, scaled by fraction of the episode elapsed (zero once the runner reaches `SPECIAL_MAJORITY`). |
 | `DANGER_RADIUS`             | 2     | Specials within this Chebyshev distance of the catcher are unsafe; also gates the heavy/light split of the catcher term. |
@@ -87,11 +87,14 @@ CAPTURE_BONUS · ( |curr.captured_squares| − |prev.captured_squares| )
 
 `prev` is from before the trainee moved, `curr` is from after the opponent
 replied. Captures can only happen on the runner's turn, so this delta is `0`
-or `1` per transition. The bonus is `+0.2` for one capture — small enough
+or `1` per transition. The bonus is `+0.24` for one capture — small enough
 that the terminal `±1` still dominates the win/lose verdict over an episode,
 large enough to clearly beat the per-step soft costs (alive bonus,
 attraction, light catcher branch) so the runner doesn't pass up a free
-capture during normal play.
+capture during normal play. Note that it does **not** outweigh the heavy
+catcher branch (`−0.30` at cheb 1) — capturing a special that sits adjacent
+to the catcher yields a net negative shaped reward by design, on the
+assumption that the catcher would intercept on arrival anyway.
 
 ### Alive bonus — flat `+ALIVE_BONUS`
 
@@ -128,15 +131,15 @@ stepped to a cell farther from where the catcher was when it decided.
 
 The heavy branch (`CATCHER_DISTANCE_COEFF = 0.30`) fires only when the runner
 is already in striking range *and* failed to retreat. At Chebyshev 1 that's
-`−0.30` — larger in magnitude than the `+0.2` capture bonus, so the runner is
+`−0.30` — larger in magnitude than the `+0.24` capture bonus, so the runner is
 incentivised to flee even mid-capture-run when the catcher closes and the
 remaining specials sit in the wrong direction.
 
-The light branch (`CATCHER_PROXIMITY_COEFF = 0.03`) covers the other two
+The light branch (`CATCHER_PROXIMITY_COEFF = 0.02`) covers the other two
 cases. In the danger zone but actively retreating, it keeps a mild downward
 pressure without punishing the good choice. In the safe zone it acts as a
 constant "the catcher still exists" tax, scaled inversely by distance so it
-fades as the runner gets clear (e.g. `−0.005` at cheb 6).
+fades as the runner gets clear (e.g. `≈ −0.0033` at cheb 6).
 
 ### Projectile threat penalty — `_projectile_threat_penalty(curr)`
 
@@ -171,8 +174,8 @@ reward    = ATTRACTION_NEAREST        / max(1, cheb(safe[0], runner))
 If no safe specials remain, the term is `0`. The `DANGER_RADIUS` filter is
 there so the runner is never *positively* steered toward a special inside the
 catcher's strike zone — the catcher would just intercept on arrival. At
-distance 1 the combined attraction contributes at most `0.03 + 0.01 = 0.04`
-— clearly less than the `+0.2` for actually landing on the square, so
+distance 1 the combined attraction contributes at most `0.01 + 0.005 = 0.015`
+— clearly less than the `+0.24` for actually landing on the square, so
 "capture it" always beats "linger near it." Only the two nearest safe
 specials count; farther specials add nothing, so the runner isn't rewarded
 for being equidistant from many remote specials.
@@ -250,15 +253,15 @@ A few worst-case sums to keep the relative scales straight:
   (`−0.25`), shortfall = 4 at turn 38 (urgency `≈ −0.019`), no captures,
   no safe specials, no waste, alive bonus (`+0.005`): shaping ≈ `−0.56`.
   Still above the `−1` terminal as a single-step signal.
-- **Per-step ceiling.** Captured a special (`+0.2`) on a transition where
-  the runner is on top of one safe special (`+0.03`) with another at
-  distance 1 (`+0.01`), catcher far in the safe zone (light branch
-  ≈ `−0.005` at cheb 6), no bullets, no waste, alive (`+0.005`): shaping
-  ≈ `+0.24`. Below the `+1` terminal. (The capture takes the runner to
+- **Per-step ceiling.** Captured a special (`+0.24`) on a transition where
+  the runner is on top of one safe special (`+0.01`) with another at
+  distance 1 (`+0.005`), catcher far in the safe zone (light branch
+  ≈ `−0.0033` at cheb 6), no bullets, no waste, alive (`+0.005`): shaping
+  ≈ `+0.26`. Below the `+1` terminal. (The capture takes the runner to
   ≥ 1 captures; once shortfall hits 0 the urgency term silently zeros out.)
 - **Per-episode cumulative shaping (excluding capture events).** Roughly
-  bounded by `20 × (0.005 + 0.03 + 0.01) ≈ +0.9` from alive + attraction
-  alone. Captures add up to `7 × 0.2 = 1.4` more in a perfect run, but a
+  bounded by `20 × (0.005 + 0.01 + 0.005) = +0.4` from alive + attraction
+  alone. Captures add up to `7 × 0.24 ≈ +1.68` more in a perfect run, but a
   7-capture episode also ends in the runner's favor — the shaping is
   rewarding the path the policy should take, not gaming an undeserved win.
 - **Per-episode cumulative urgency.** Worst case (shortfall = 4 for the

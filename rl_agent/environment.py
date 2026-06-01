@@ -16,13 +16,14 @@ class CatchyRunEnv(gym.Env):
             moves = legal[legal < 8]
             shoots = legal[legal >= 8]
             if len(shoots) and len(moves):
-                pool = moves if self.np_random.random() < 0.90 else shoots
+                pool = moves if self.np_random.random() < 0.80 else shoots
                 return int(self.np_random.choice(pool))
         return int(self.np_random.choice(legal))
 
     def __init__(self, trainee_role : engine.Agent, opponent_policy = None):
         super().__init__()
         self._opponent_pool = None
+        self._opponent_weights = None
         self._opponent_policy = opponent_policy or self._default_opponent
         self._current_opponent = self._opponent_policy
         self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(9,7,7), dtype=np.float32)
@@ -48,13 +49,17 @@ class CatchyRunEnv(gym.Env):
         self._opponent_policy = opponent_policy
         self._opponent_pool = None
 
-    def set_opponent_pool(self, opponents: list):
+    def set_opponent_pool(self, opponents: list, weights: list | None = None):
         self._opponent_pool = list(opponents)
+        self._opponent_weights = weights
         self._opponent_policy = None
 
     def _sample_opponent(self):
         if self._opponent_pool is not None:
-            idx = self.np_random.integers(len(self._opponent_pool))
+            if self._opponent_weights is not None:
+                idx = self.np_random.choice(len(self._opponent_pool), p= self._opponent_weights)
+            else:
+                idx = self.np_random.integers(len(self._opponent_pool))
             return self._opponent_pool[idx]
         return self._opponent_policy
 
