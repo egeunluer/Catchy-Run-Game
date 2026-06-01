@@ -46,7 +46,7 @@ The discrete action space has size **16**. All directions are ordered clockwise 
 
 Coordinates: `(0, 0)` is top-left; `+x` east, `+y` south.
 
-## Engine contract (for the Gymnasium / PettingZoo wrapper)
+## Engine contract
 
 `catcher_vs_runner.engine` exposes:
 
