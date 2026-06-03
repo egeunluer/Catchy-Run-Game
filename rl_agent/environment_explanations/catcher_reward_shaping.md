@@ -30,12 +30,20 @@ construction time based on `trainee_role`.
 
 ## Tunables (class attributes)
 
-| Attribute                 | Value | What it controls                                                                                       |
-|---------------------------|-------|--------------------------------------------------------------------------------------------------------|
-| `CAPTURE_BLOCK_PENALTY`   | 0.20  | Penalty per special the runner captured this transition. Direct anti-progress signal.                  |
-| `DISTANCE_CLOSURE_COEFF`  | 0.02  | Numerator of the inverse-distance bonus. Small on purpose — terminal kill is the dominant chase signal. |
-| `BULLET_COVERAGE_COEFF`   | 0.10  | Numerator of the per-bullet coverage bonus.                                                            |
-| `BULLET_COVERAGE_CAP`     | 3     | Only the `N` bullets closest to the runner contribute to the coverage bonus. Prevents spam inflation.  |
+| Attribute                       | Value | What it controls                                                                                       |
+|---------------------------------|-------|--------------------------------------------------------------------------------------------------------|
+| `CAPTURE_BLOCK_PENALTY`         | 0.20  | Penalty per special the runner captured this transition. Direct anti-progress signal.                  |
+| `DISTANCE_CLOSURE_COEFF`        | 0.02  | Numerator of the inverse-distance bonus. Small on purpose — terminal kill is the dominant chase signal. |
+| `BULLET_COVERAGE_COEFF`         | 0.10  | Numerator of the per-bullet coverage bonus.                                                            |
+| `BULLET_COVERAGE_CAP`           | 3     | Only the `N` bullets closest to the runner contribute to the coverage bonus. Prevents spam inflation.  |
+| `SPECIAL_DEFENSE_COEFF`         | 0.10  | Flat bonus per bullet whose forward path threatens a special the runner is about to capture.           |
+| `SPECIAL_DEFENSE_LOOKAHEAD`     | 2     | Cells along each bullet's path to scan. Covers cheb 2-3 from the catcher for a freshly fired bullet.   |
+| `SPECIAL_DEFENSE_CAP`           | 2     | At most `N` bullets contribute to the defense bonus per step.                                          |
+
+The runner-threat side of the qualification is no longer a fixed
+Chebyshev radius — it is a structural reach predicate covering both
+step and sprint moves. See the "Special-defense bonus" section below
+for the exact definition.
 
 Distances are **Chebyshev** throughout, matching the engine's 8-directional
 movement (one step in any direction equals one unit of Chebyshev distance).
@@ -51,6 +59,7 @@ shaped = base
        − CAPTURE_BLOCK_PENALTY · newly_captured                          # anti-progress
        + DISTANCE_CLOSURE_COEFF / max(1, cheb(runner, catcher))          # distance closure
        + Σ over top-K bullets:  BULLET_COVERAGE_COEFF / max(1, min(d₁, d₂))   # bullet coverage
+       + SPECIAL_DEFENSE_COEFF · qualifying_bullets                      # special defense
 ```
 
 where `K = BULLET_COVERAGE_CAP` and `d₁`, `d₂` are Chebyshev distances
@@ -137,6 +146,110 @@ The cap is implemented by sorting per-bullet scores descending and
 summing the prefix — bullets that are *closer* to the runner contribute
 preferentially.
 
+### Special-defense bonus — `_special_defense_bonus(curr)`
+
+```
+for each bullet (px, py), (dx, dy) in curr.projectiles:
+    for k in 1 .. SPECIAL_DEFENSE_LOOKAHEAD:
+        cell = (px + k·dx, py + k·dy)
+        if cell is an uncaptured special
+           and runner can reach cell in one turn (step or legal sprint):
+            qualifying += 1
+            break       # count each bullet at most once
+        if qualifying ≥ SPECIAL_DEFENSE_CAP:
+            break outer
+
+bonus = SPECIAL_DEFENSE_COEFF · qualifying
+```
+
+The "runner can reach in one turn" predicate is encoded directly
+rather than as a Chebyshev radius:
+
+```
+runner_reaches_in_one(state, target):
+    if cheb(state.runner_pos, target) ≤ 1:
+        return True                              # 8-directional step
+    if state.sprint_charges ≤ 0:
+        return False
+    dx, dy = target − state.runner_pos
+    if not ((dx == 0 and |dy| == 3) or (dy == 0 and |dx| == 3)):
+        return False                             # sprint is cardinal-3 only
+    one_ahead = state.runner_pos + sign(dx, dy)
+    if one_ahead == state.catcher_pos:           # sprint path blocked
+        return False
+    if target == state.catcher_pos:              # destination blocked
+        return False
+    return True
+```
+
+This term exists because the bullet-coverage bonus rewards proximity to
+the runner directly — it pulls the catcher into "shoot wherever the
+runner is moving" behavior. But the runner's actual *goal* is the special
+squares, not the squares it currently occupies. A well-played catcher
+shouldn't only chase the runner; it should pre-fire onto contested
+specials when the runner is one step from capturing them.
+
+The qualification check has three parts and all three must hold:
+
+1. **A cell on the bullet's forward path** within `SPECIAL_DEFENSE_LOOKAHEAD`
+   cells. Since bullets only travel in the 8 cardinal/diagonal
+   directions, this is automatically equivalent to "the special is on
+   one of the 8 rays from the bullet's current position" — the
+   "shootable direction" requirement.
+2. **That cell is an uncaptured special.** Captured specials don't need
+   defending.
+3. **The runner can reach that cell in one turn**, by either an
+   8-directional step (`cheb(runner, cell) ≤ 1`) or a *legal* sprint.
+   A sprint is legal when `sprint_charges > 0`, the move is a cardinal
+   3-cell jump, the one-cell-ahead cell isn't occupied by the catcher,
+   and the destination cell isn't occupied by the catcher. Sprint is
+   included because a sprint-reachable special is just as imminently
+   capturable as a step-reachable one — both are "one move away" by
+   the engine's action set, and the catcher should treat them
+   symmetrically when deciding where to fire. The predicate is
+   encoded directly rather than as a Chebyshev radius because sprint
+   is cardinal-only with charge and path constraints: a generic
+   radius would over-count (it would include diagonals at distance 2
+   and 3, which sprint cannot reach) and under-count (it would miss
+   the cardinal-3 cells that sprint *can* reach unless the radius is
+   widened, in which case it picks up everything in between). The
+   predicate also refuses to mark a special as threatened when the
+   runner physically cannot sprint to it next turn (catcher blocks
+   the path, no charges remaining), so the bonus only fires for
+   shots aimed at specials the runner could *actually* land on.
+
+For a *freshly fired* bullet (current position `catcher + dir`), the
+`LOOKAHEAD = 2` window scans cells at cheb 2 and 3 from the catcher — so
+the bonus fires for shots aimed at specials 2 or 3 squares away in any
+of the 8 directions, provided the runner is poised to capture them. For
+*older* bullets in flight, the same lookahead scans the next two cells
+of the bullet's trajectory regardless of where the catcher now stands.
+
+This lookahead matches the sprint geometry cleanly: sprint-reachable
+specials sit at cardinal distance 3 from the runner, and a bullet
+aimed cardinally at such a special will land its second forward cell
+on the special when fired from cheb-distance 3 — so the predicate's
+sprint clause and the lookahead window cover the same shots without
+extra tuning.
+
+Why a flat per-bullet bonus instead of an inverse-distance formula like
+the coverage term? The defense condition is binary: either the bullet
+threatens a runner-imminent special or it doesn't. There's no "almost
+defending" a special — the bullet is either on a defensive line or it
+isn't. A flat bonus reflects this cleanly without spuriously rewarding
+near-misses.
+
+The cap (`SPECIAL_DEFENSE_CAP = 2`) bounds the per-step contribution at
+`2 · 0.10 = +0.20` even when multiple bullets happen to converge on
+multiple contested specials simultaneously, keeping the term from
+runaway-rewarding chaotic mid-game bullet clouds. The cap also
+absorbs the modest increase in qualifying frequency introduced by the
+sprint clause: more cells satisfy part 3 per turn — especially in the
+early game when the runner has all 3 sprint charges and several
+cardinal-3 lines into uncaptured specials — but the per-step
+contribution is still bounded at `+0.20`, so the calibration math in
+the next section is unchanged.
+
 ## Why these magnitudes (calibration)
 
 A few worst-case sums to confirm the shaping never out-votes the terminal
@@ -144,9 +257,12 @@ A few worst-case sums to confirm the shaping never out-votes the terminal
 
 - **Per-step ceiling.** Catcher adjacent to runner (closure `+0.02`),
   three bullets each one cell from the runner's next-tick path (coverage
-  `+0.30`), no capture this transition: shaping `≈ +0.32`. Below the `+1`
-  terminal kill reward — a kill is always more rewarding than maintaining
-  pressure.
+  `+0.30`), two bullets simultaneously threatening contested specials
+  (defense `+0.20`), no capture this transition: shaping `≈ +0.52`. Still
+  below the `+1` terminal kill reward — a kill remains more rewarding
+  than maintaining maximum pressure. In practice the coverage and
+  defense terms rarely both saturate, since the bullets that maximize
+  one tend not to maximize the other.
 - **Per-step floor.** Catcher far from runner (closure `≈ +0.003` at
   cheb 6), no bullets in flight, runner captured a special
   (`−0.20`): shaping `≈ −0.20`. Above the `−1` terminal loss.

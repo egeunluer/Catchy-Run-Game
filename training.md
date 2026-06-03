@@ -17,11 +17,11 @@ Tick boxes as you progress:
 - [ ] **Stage 3** — train against a pool of past catcher snapshots + heuristic
 
 ### Catcher
-- [ ] **Stage 1** — train against the bundled heuristic runner
+- [ ] **Stage 1** — train against the trained runner snapshot `catchy_run_runner_stage0_v1_4_1`
 - [ ] **Stage 2** — train against the latest runner snapshot
 - [ ] **Stage 3** — train against a pool of past runner snapshots + heuristic
 
-The catcher has no Stage 0: its objective (catch the runner / stall to timeout) gives dense enough feedback that learning against the heuristic runner from scratch works. The catcher does, however, get its own lightweight reward shaper (`CatcherRewardShaper`) to scaffold projectile tactics — the sparse signal would otherwise teach pure stepping (see `rl_agent/environment_explanations/catcher_reward_shaping.md`).
+The catcher has no Stage 0: it starts directly against the trained runner checkpoint `catchy_run_runner_stage0_v1_4_1`. That snapshot actively pursues special squares (~4.8 captures per episode against a random catcher), so the engine's terminal ±1 gives a real gradient from step 1 instead of paying out free timeout wins for inaction. The catcher additionally gets its own lightweight reward shaper (`CatcherRewardShaper`) to scaffold projectile tactics — the sparse signal would otherwise teach pure stepping (see `rl_agent/environment_explanations/catcher_reward_shaping.md`).
 
 ---
 
@@ -100,9 +100,9 @@ Budget: 300k steps. Extend to 500k–1M if the capture rate hasn't crossed the 4
 
 ---
 
-## Stage 1 — Heuristic opponent
+## Stage 1 — Skill floor
 
-**Goal:** establish a skill floor. Each model trains against the bundled heuristic of the opposing role.
+**Goal:** establish a skill floor. The runner trains against the bundled heuristic catcher; the catcher trains against the trained runner snapshot `catchy_run_runner_stage0_v1_4_1`.
 
 ### Setup
 
@@ -120,15 +120,15 @@ train(load_from="catchy_run_runner_stage0",
       ent_coef=0.005)   # lower entropy so it refines instead of thrashing
 ```
 
-**Catcher** — from scratch against the heuristic runner. `make_env` in `model.py` already branches by `trainee_role` and binds `CatcherRewardShaper` automatically via `environment.py`:
+**Catcher** — from scratch against the trained runner snapshot `catchy_run_runner_stage0_v1_4_1`. `make_env(trainee_role="catcher")` in `model.py` plugs `rl_runner_policy` (from `catchy_run_game/agents/rl_runner.py`, which lazily loads the runner checkpoint) in as the inline opponent, and `environment.py` binds `CatcherRewardShaper` automatically based on `trainee_role`:
 
 ```python
 train(trainee_role="catcher",
-      save_to="catchy_run_catcher_stage1",
-      tb_log_name="catcher_stage1")
+      save_to="catchy_run_catcher_stage1_v0",
+      tb_log_name="catcher_stage1_v0")
 ```
 
-Catcher shaping (capture-block, distance-closure, bullet-coverage) is light by design — it nudges the policy toward projectile use without overriding the terminal verdict. See `rl_agent/environment_explanations/catcher_reward_shaping.md` before tuning coefficients.
+The trained runner captures aggressively enough that catcher episodes terminate on real outcomes (kill, projectile kill, or contested timeout) rather than the runner failing to reach majority. That makes the engine's terminal ±1 the dominant training signal from the first rollout. Catcher shaping (capture-block, distance-closure, bullet-coverage, special-defense) is light by design — it nudges the policy toward projectile use without overriding the terminal verdict. See `rl_agent/environment_explanations/catcher_reward_shaping.md` before tuning coefficients.
 
 The two trainings are independent — run them sequentially or in parallel processes.
 

@@ -82,14 +82,6 @@ Channel 3 carries the runner's sprint counter. The catcher has no depletable res
 
 Rewards: `±1.0` to the winner / loser on termination, `0.0` on every other step.
 
-## Heuristic baseline
-
-```bash
-python -m catchy_run_game.balance
-```
-
-Runs the bundled heuristic agents against each other and reports win rates with a 95% CI. Use it as a balance sanity-check whenever you change game parameters.
-
 ## RL training
 
 The `rl_agent/` package wraps the engine for training. The engine's own reward is sparse — `±1` on termination, `0` otherwise — so `rl_agent/reward_shaping.py` adds per-step shaping signals on top of it. A shared `RewardShaper` base class owns common helpers; `RunnerRewardShaper` and `CatcherRewardShaper` subclass it with role-specific signals, and `environment.py` picks the right one at construction time.
@@ -116,12 +108,13 @@ All magnitudes are tuned so the engine's terminal `±1` still dominates the win/
 ## Project layout
 
 ```
-catcher_vs_runner/
+catchy_run/
   engine.py            Pure game logic.
   actions.py           Action index constants + ACTION_NAMES.
-  balance.py           Heuristic-vs-heuristic harness.
   agents/
     heuristic.py       Greedy baselines.
+    rl_catcher.py
+    rl_runner.py
   render/
     pygame_app.py      pygame renderer + click handlers.
   main.py              Entry point.

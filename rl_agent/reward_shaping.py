@@ -107,6 +107,28 @@ class CatcherRewardShaper(RewardShaper):
     DISTANCE_CLOSURE_COEFF = 0.02
     BULLET_COVERAGE_COEFF = 0.10
     BULLET_COVERAGE_CAP = 3
+    SPECIAL_DEFENSE_COEFF = 0.10
+    SPECIAL_DEFENSE_LOOKAHEAD = 2
+    SPECIAL_DEFENSE_CAP = 2
+
+    @staticmethod
+    def _runner_reaches_in_one(state: GameState, target: tuple[int, int]) -> bool:
+        runner = state.runner_pos
+        catcher = state.catcher_pos
+        if max(abs(runner[0] - target[0]), abs(runner[1] - target[1])) <= 1:
+            return True
+        if state.sprint_charges <= 0:
+            return False
+        dx = target[0] - runner[0]
+        dy = target[1] - runner[1]
+        if not ((dx == 0 and abs(dy) == 3) or (dy == 0 and abs(dx) == 3)):
+            return False
+        step_dx = 0 if dx == 0 else (1 if dx > 0 else -1)
+        step_dy = 0 if dy == 0 else (1 if dy > 0 else -1)
+        one_ahead = (runner[0] + step_dx, runner[1] + step_dy)
+        if one_ahead == catcher or target == catcher:
+            return False
+        return True
 
     def _capture_block_penalty(self, prev: GameState, curr: GameState) -> float:
         newly_captured = len(curr.captured_squares) - len(prev.captured_squares)
@@ -128,8 +150,24 @@ class CatcherRewardShaper(RewardShaper):
         scores.sort(reverse=True)
         return sum(scores[:self.BULLET_COVERAGE_CAP])
 
+    def _special_defense_bonus(self, curr: GameState) -> float:
+        remaining = curr.special_squares - curr.captured_squares
+        if not remaining or not curr.projectiles:
+            return 0.0
+        qualifying = 0
+        for (px, py), (dx, dy) in curr.projectiles:
+            for k in range(1, self.SPECIAL_DEFENSE_LOOKAHEAD + 1):
+                cell = (px + k * dx, py + k * dy)
+                if cell in remaining and self._runner_reaches_in_one(curr, cell):
+                    qualifying += 1
+                    break
+            if qualifying >= self.SPECIAL_DEFENSE_CAP:
+                break
+        return self.SPECIAL_DEFENSE_COEFF * qualifying
+
     def _compute(self, prev_state: GameState, curr_state: GameState, base_reward: float) -> float:
         return (base_reward
                 + self._capture_block_penalty(prev_state, curr_state)
                 + self._distance_closure_bonus(curr_state)
-                + self._bullet_coverage_bonus(curr_state))
+                + self._bullet_coverage_bonus(curr_state)
+                + self._special_defense_bonus(curr_state))

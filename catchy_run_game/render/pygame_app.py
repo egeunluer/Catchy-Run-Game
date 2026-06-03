@@ -1,4 +1,4 @@
-"""Pygame renderer + click-to-play interface for Catcher vs. Runner.
+"""Pygame renderer + click-to-play interface for Catchy Run.
 
 The app imports `engine` and uses its public API only — clicks are
 translated to action indices and submitted via `engine.step`. The trained
@@ -25,7 +25,7 @@ from ..actions import (
     MOVE_ACTIONS,
     SPECIAL_ACTIONS,
 )
-from ..agents.heuristic import catcher_policy, runner_policy
+from ..agents.rl_catcher import rl_catcher_policy
 from ..agents.rl_runner import rl_runner_policy
 
 # --- Layout --------------------------------------------------------------
@@ -58,8 +58,7 @@ Y_HDR_GAME = Y_DIV2 + 12
 Y_BTN_GM_1 = Y_HDR_GAME + 28
 Y_BTN_GM_2 = Y_BTN_GM_1 + BTN_STEP
 Y_BTN_GM_3 = Y_BTN_GM_2 + BTN_STEP
-Y_BTN_GM_4 = Y_BTN_GM_3 + BTN_STEP
-Y_BTN_NEW = Y_BTN_GM_4 + BTN_STEP + 14
+Y_BTN_NEW = Y_BTN_GM_3 + BTN_STEP + 14
 Y_FOOTER = Y_BTN_NEW + NEW_GAME_H + 16
 
 SIDEBAR_BOTTOM = Y_FOOTER + 28
@@ -91,9 +90,8 @@ MODE_SPECIAL = "SPECIAL"
 ACTION_MODES = [MODE_MOVE, MODE_SPECIAL]
 
 GM_HVH = "HVH"
-GM_AI_RUNNER = "AI_RUNNER"
-GM_AI_CATCHER = "AI_CATCHER"
 GM_AI_RUNNER_RL = "AI_RUNNER_RL"
+GM_AI_CATCHER_RL = "AI_CATCHER_RL"
 
 
 @dataclass
@@ -176,7 +174,7 @@ def _legal_target_cells(state: engine.GameState, mode: str) -> set[tuple[int, in
 class App:
     def __init__(self) -> None:
         pygame.init()
-        pygame.display.set_caption("Catcher vs. Runner")
+        pygame.display.set_caption("Catchy Run")
         self.screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
         self.clock = pygame.time.Clock()
         self.font_lg = pygame.font.SysFont("helvetica", 22, bold=True)
@@ -201,9 +199,8 @@ class App:
             ))
         gm_entries = [
             (Y_BTN_GM_1, "Human vs. Human", f"gm:{GM_HVH}"),
-            (Y_BTN_GM_2, "Human catcher (AI runner)", f"gm:{GM_AI_RUNNER}"),
-            (Y_BTN_GM_3, "Human runner (AI catcher)", f"gm:{GM_AI_CATCHER}"),
-            (Y_BTN_GM_4, "Human catcher (RL runner)", f"gm:{GM_AI_RUNNER_RL}"),
+            (Y_BTN_GM_2, "Human catcher (RL runner)", f"gm:{GM_AI_RUNNER_RL}"),
+            (Y_BTN_GM_3, "Human runner (RL catcher)", f"gm:{GM_AI_CATCHER_RL}"),
         ]
         for y, label, key in gm_entries:
             buttons.append(Button(
@@ -225,9 +222,9 @@ class App:
         return pygame.Rect(gx + cell[0] * CELL, gy + cell[1] * CELL, CELL, CELL)
 
     def _ai_role(self) -> Optional[str]:
-        if self.game_mode in (GM_AI_RUNNER, GM_AI_RUNNER_RL):
+        if self.game_mode == GM_AI_RUNNER_RL:
             return "runner"
-        if self.game_mode == GM_AI_CATCHER:
+        if self.game_mode == GM_AI_CATCHER_RL:
             return "catcher"
         return None
 
@@ -250,18 +247,21 @@ class App:
         if pygame.time.get_ticks() < self.ai_pending_at:
             return
         if self.state.current_agent == "runner":
-            if self.game_mode == GM_AI_RUNNER_RL:
-                try:
-                    action = rl_runner_policy(self.state, self.rng)
-                except Exception as e:
-                    print(f"[pygame_app] RL runner failed: {e}\nFalling back to HVH.")
-                    self.game_mode = GM_HVH
-                    self.ai_pending_at = None
-                    return
-            else:
-                action = runner_policy(self.state, self.rng)
+            try:
+                action = rl_runner_policy(self.state, self.rng)
+            except Exception as e:
+                print(f"[pygame_app] RL runner failed: {e}\nFalling back to HVH.")
+                self.game_mode = GM_HVH
+                self.ai_pending_at = None
+                return
         else:
-            action = catcher_policy(self.state, self.rng)
+            try:
+                action = rl_catcher_policy(self.state, self.rng)
+            except Exception as e:
+                print(f"[pygame_app] RL catcher failed: {e}\nFalling back to HVH.")
+                self.game_mode = GM_HVH
+                self.ai_pending_at = None
+                return
         new_state, *_ = engine.step(self.state, action)
         self.state = new_state
         if self._is_ai_turn():
@@ -372,7 +372,7 @@ class App:
     def _draw_sidebar(self) -> None:
         x = SIDEBAR_X
 
-        self.screen.blit(self.font_lg.render("Catcher vs. Runner", True, C_TEXT), (x, Y_TITLE))
+        self.screen.blit(self.font_lg.render("Catchy Run", True, C_TEXT), (x, Y_TITLE))
 
         if self.state.terminated:
             winner = self.state.winner or "?"

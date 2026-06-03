@@ -17,7 +17,8 @@ def make_env(trainee_role: Agent):
         env = CatchyRunEnv(trainee_role=trainee_role)
         env.set_opponent_pool([env._default_opponent, heuristic_opponent], weights=[0.1, 0.9])
     else:
-        env = CatchyRunEnv(trainee_role=trainee_role, opponent_policy=heuristic_opponent)
+        from catchy_run.catchy_run_game.agents.rl_runner import rl_runner_policy
+        env = CatchyRunEnv(trainee_role=trainee_role, opponent_policy=lambda state: rl_runner_policy(state))
     env = ActionMasker(env, mask_fn)
     return env
 
@@ -59,12 +60,12 @@ def train(trainee_role: Agent,
             env=env,
             policy_kwargs=policy_kwargs,
             learning_rate=3e-4,
-            n_steps=2048,
-            batch_size=64,
+            n_steps=4096,
+            batch_size=256,
             gamma=0.99,
             gae_lambda=0.95,
             clip_range=0.2,
-            ent_coef=0.01,
+            ent_coef=0.05,
             verbose=1,
             tensorboard_log="./tb_logs/",
             device="auto"
@@ -76,6 +77,6 @@ def train(trainee_role: Agent,
 
 if __name__ == "__main__":
     #Change the signature of this train method to continue from a trained model
-    train(load_from= "catchy_run_runner_stage0_v1_4_0",total_timesteps= 200000,trainee_role="runner", save_to="catchy_run_runner_stage0_v1_4_1", tb_log_name="runner_stage0_v1_4_1", ent_coef=0.01, learning_rate=5e-5)
+    train(load_from= None,total_timesteps= 300000,trainee_role="catcher", save_to="catchy_run/trained_model_checkpoints/catcher_models/catchy_run_catcher_stage1_v0_0", tb_log_name="catcher_stage1_v0_0", ent_coef=0.01, learning_rate=1e-4)
     # Catcher Stage 1 example (fresh train against the heuristic runner):
     # train(trainee_role="catcher", total_timesteps=200_000, save_to="catchy_run_catcher_stage1_v0", tb_log_name="catcher_stage1_v0")
