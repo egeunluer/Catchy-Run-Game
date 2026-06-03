@@ -19,7 +19,7 @@ Run once from the project root:
 bash build_app.sh
 ```
 
-This produces `CatcherVsRunner.app` next to `pyproject.toml`. Double-click it from Finder to launch the game with no Terminal window. The bundle is relocatable — move it to your Desktop or `/Applications` and it still works.
+This produces `CatchyRun.app` next to `pyproject.toml`. Double-click it from Finder to launch the game with no Terminal window. The bundle is relocatable — move it to your Desktop or `/Applications` and it still works.
 
 The launcher uses your existing `python3`, so `pygame` and `numpy` must be installed in that interpreter. If you move the project to a different directory, rerun `bash build_app.sh` so the launcher picks up the new path.
 
@@ -48,7 +48,7 @@ Coordinates: `(0, 0)` is top-left; `+x` east, `+y` south.
 
 ## Engine contract
 
-`catcher_vs_runner.engine` exposes:
+`catchy_run_game.engine` exposes:
 
 - `GameState` — frozen dataclass holding the full state.
 - `reset(seed: int | None = None) -> GameState` — explicit `int` reproduces the same special-square layout deterministically; `None` uses OS entropy.
@@ -108,7 +108,7 @@ All magnitudes are tuned so the engine's terminal `±1` still dominates the win/
 ## Project layout
 
 ```
-catchy_run/
+catchy_run_game/
   engine.py            Pure game logic.
   actions.py           Action index constants + ACTION_NAMES.
   agents/
@@ -132,4 +132,7 @@ rl_agent/
     opponent_structure.md      Deep doc for opponents.py.
 tests/
   test_engine.py
+trained_model_checkpoints/      The models that are used while playing against AI
+  catcher_models/       Catcher model is not trained
+  runner_models/        Runner model can effectively play, it still cannot dodge bullets.
 ```
