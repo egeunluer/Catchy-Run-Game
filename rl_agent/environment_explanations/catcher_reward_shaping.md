@@ -38,7 +38,9 @@ construction time based on `trainee_role`.
 | `BULLET_COVERAGE_CAP`           | 3     | Only the `N` bullets closest to the runner contribute to the coverage bonus. Prevents spam inflation.  |
 | `SPECIAL_DEFENSE_COEFF`         | 0.10  | Flat bonus per bullet whose forward path threatens a special the runner is about to capture.           |
 | `SPECIAL_DEFENSE_LOOKAHEAD`     | 2     | Cells along each bullet's path to scan. Covers cheb 2-3 from the catcher for a freshly fired bullet.   |
-| `SPECIAL_DEFENSE_CAP`           | 2     | At most `N` bullets contribute to the defense bonus per step.                                          |
+| `SPECIAL_DEFENSE_CAP`           | 2     | At most `N` qualifying items (bullet-path or catcher-ray) contribute to the defense bonus per step.    |
+| `SPECIAL_DEFENSE_RAY_MIN_DIST`  | 4     | Lower Chebyshev bound (inclusive) for the catcher-ray scan that backs up the bullet-path check.        |
+| `SPECIAL_DEFENSE_RAY_MAX_DIST`  | 5     | Upper Chebyshev bound (inclusive) for the catcher-ray scan.                                            |
 
 The runner-threat side of the qualification is no longer a fixed
 Chebyshev radius — it is a structural reach predicate covering both
@@ -59,7 +61,7 @@ shaped = base
        − CAPTURE_BLOCK_PENALTY · newly_captured                          # anti-progress
        + DISTANCE_CLOSURE_COEFF / max(1, cheb(runner, catcher))          # distance closure
        + Σ over top-K bullets:  BULLET_COVERAGE_COEFF / max(1, min(d₁, d₂))   # bullet coverage
-       + SPECIAL_DEFENSE_COEFF · qualifying_bullets                      # special defense
+       + SPECIAL_DEFENSE_COEFF · qualifying                              # special defense (bullet-path + catcher-ray)
 ```
 
 where `K = BULLET_COVERAGE_CAP` and `d₁`, `d₂` are Chebyshev distances
@@ -148,7 +150,14 @@ preferentially.
 
 ### Special-defense bonus — `_special_defense_bonus(curr)`
 
+The bonus pools two categories of qualifying items into a single
+shared cap (`SPECIAL_DEFENSE_CAP`). The bullet-path scan runs first;
+if it doesn't saturate the cap, the catcher-ray scan tops it up.
+
 ```
+qualifying = 0
+
+# (A) Bullet-path scan — imminent threats already in flight.
 for each bullet (px, py), (dx, dy) in curr.projectiles:
     for k in 1 .. SPECIAL_DEFENSE_LOOKAHEAD:
         cell = (px + k·dx, py + k·dy)
@@ -156,8 +165,23 @@ for each bullet (px, py), (dx, dy) in curr.projectiles:
            and runner can reach cell in one turn (step or legal sprint):
             qualifying += 1
             break       # count each bullet at most once
+    if qualifying ≥ SPECIAL_DEFENSE_CAP:
+        break
+
+# (B) Catcher-ray scan — "good shot is available" on a slightly
+# slower threat, independent of whether a bullet exists yet.
+if qualifying < SPECIAL_DEFENSE_CAP:
+    for (dx, dy) in DIRECTIONS_8:
+        for k in SPECIAL_DEFENSE_RAY_MIN_DIST .. SPECIAL_DEFENSE_RAY_MAX_DIST:
+            cell = (catcher_x + k·dx, catcher_y + k·dy)
+            if cell out of bounds:
+                continue
+            if cell is an uncaptured special
+               and runner can reach cell in exactly two turns:
+                qualifying += 1
+                break       # count each direction at most once
         if qualifying ≥ SPECIAL_DEFENSE_CAP:
-            break outer
+            break
 
 bonus = SPECIAL_DEFENSE_COEFF · qualifying
 ```
@@ -231,6 +255,52 @@ aimed cardinally at such a special will land its second forward cell
 on the special when fired from cheb-distance 3 — so the predicate's
 sprint clause and the lookahead window cover the same shots without
 extra tuning.
+
+**Catcher-ray supplement.** The bullet-path scan only fires when the
+catcher has *already* committed a bullet whose forward two cells land
+on a runner-1-reachable special. That misses a class of situations the
+shaper wants to credit: the catcher is standing 4-5 cells from an
+uncaptured special on one of its 8 firing rays, and the runner is two
+moves away from that special. The shot isn't fired yet, but the
+*shot is available* — a SHOOT action in that direction this turn would
+plant a bullet whose next cells track straight into the contested
+square. Without this supplement the sparse expectation marks such
+"setup" turns as wasted, exactly the failure mode this shaper exists
+to prevent.
+
+The supplement scans the catcher's 8 rays at cheb 4 and 5 and counts a
+direction as qualifying when the cell on the ray is an uncaptured
+special the runner can reach in *exactly* two turns (the
+`_runner_reaches_in_exactly_two` predicate). The "exactly two" half is
+load-bearing — 1-reach cells are already covered by the bullet-path
+scan, and 3+ reach is too distant to credibly pressure right now.
+"Exactly two" is computed by enumerating the runner's 12 legal first
+moves (8 steps + 4 sprints, respecting bounds, catcher-blocking, and
+sprint charges, with the +1 charge if the first move lands on a
+special), and asking whether any of those intermediate positions
+yields a 1-turn reach onto the target assuming the catcher stays put.
+Catcher-side movement is approximated as stationary because the
+shaping signal is about the catcher's *opportunity now*, not a
+guaranteed kill.
+
+The `[4, 5]` window is chosen to mesh with the lookahead window of the
+bullet scan and the geometry of a 2-move runner reach. Runner-2-reach
+cells live at cheb 2 from the runner (two steps), or cheb up to ~4 if
+sprint is involved; with the runner and catcher separated by a
+typical mid-board distance, the contested cells sit at cheb 4-5 from
+the catcher. Below 4 those cells would already qualify under
+"runner-1-reach" via the bullet path scan if a bullet were on the way;
+above 5 the catcher's shot takes too long to arrive relative to a
+2-move runner. Counting each direction at most once mirrors the
+"count each bullet at most once" pattern from the bullet-path scan.
+
+The two categories share the cap (`SPECIAL_DEFENSE_CAP = 2`), so the
+per-step ceiling on this term remains `+0.20`. The bullet-path scan
+runs first; the ray supplement only contributes if the bullet-path
+scan didn't already saturate the cap. That ordering makes the cap
+soak up the supplement's added qualifying frequency without inflating
+the worst-case contribution — the calibration math in the next
+section is unchanged.
 
 Why a flat per-bullet bonus instead of an inverse-distance formula like
 the coverage term? The defense condition is binary: either the bullet

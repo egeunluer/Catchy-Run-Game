@@ -1,4 +1,5 @@
-from catchy_run.catchy_run_game.engine import GameState, SPECIAL_MAJORITY, TURN_LIMIT
+from catchy_run.catchy_run_game.engine import GameState, SPECIAL_MAJORITY, TURN_LIMIT, BOARD_SIZE
+from catchy_run.catchy_run_game.actions import DIRECTIONS_8, CARDINAL_DIRS
 
 
 class RewardShaper:
@@ -108,8 +109,10 @@ class CatcherRewardShaper(RewardShaper):
     BULLET_COVERAGE_COEFF = 0.10
     BULLET_COVERAGE_CAP = 3
     SPECIAL_DEFENSE_COEFF = 0.10
-    SPECIAL_DEFENSE_LOOKAHEAD = 2
-    SPECIAL_DEFENSE_CAP = 2
+    SPECIAL_DEFENSE_NEAR_MAX = 3
+    SPECIAL_DEFENSE_FAR_MIN = 4
+    SPECIAL_DEFENSE_FAR_MAX = 5
+    BULLET_SPAM_PENALTY = 0.1
 
     @staticmethod
     def _runner_reaches_in_one(state: GameState, target: tuple[int, int]) -> bool:
@@ -129,6 +132,49 @@ class CatcherRewardShaper(RewardShaper):
         if one_ahead == catcher or target == catcher:
             return False
         return True
+
+    @staticmethod
+    def _runner_reaches_in_exactly_two(state: GameState, target: tuple[int, int]) -> bool:
+        if CatcherRewardShaper._runner_reaches_in_one(state, target):
+            return False
+        runner = state.runner_pos
+        catcher = state.catcher_pos
+        specials_open = state.special_squares - state.captured_squares
+
+        candidates: list[tuple[tuple[int, int], int]] = []
+        for sdx, sdy in DIRECTIONS_8:
+            mid = (runner[0] + sdx, runner[1] + sdy)
+            if not (0 <= mid[0] < BOARD_SIZE and 0 <= mid[1] < BOARD_SIZE):
+                continue
+            charges_after = state.sprint_charges + (1 if mid in specials_open else 0)
+            candidates.append((mid, charges_after))
+        if state.sprint_charges > 0:
+            for sdx, sdy in CARDINAL_DIRS:
+                mid = (runner[0] + 3 * sdx, runner[1] + 3 * sdy)
+                one_ahead = (runner[0] + sdx, runner[1] + sdy)
+                if not (0 <= mid[0] < BOARD_SIZE and 0 <= mid[1] < BOARD_SIZE):
+                    continue
+                if one_ahead == catcher or mid == catcher:
+                    continue
+                charges_after = state.sprint_charges - 1 + (1 if mid in specials_open else 0)
+                candidates.append((mid, charges_after))
+
+        for mid, charges_after in candidates:
+            if max(abs(mid[0] - target[0]), abs(mid[1] - target[1])) <= 1:
+                return True
+            if charges_after <= 0:
+                continue
+            dxt = target[0] - mid[0]
+            dyt = target[1] - mid[1]
+            if not ((dxt == 0 and abs(dyt) == 3) or (dyt == 0 and abs(dxt) == 3)):
+                continue
+            sx = 0 if dxt == 0 else (1 if dxt > 0 else -1)
+            sy = 0 if dyt == 0 else (1 if dyt > 0 else -1)
+            one_ahead = (mid[0] + sx, mid[1] + sy)
+            if one_ahead == catcher or target == catcher:
+                continue
+            return True
+        return False
 
     def _capture_block_penalty(self, prev: GameState, curr: GameState) -> float:
         newly_captured = len(curr.captured_squares) - len(prev.captured_squares)
@@ -150,24 +196,46 @@ class CatcherRewardShaper(RewardShaper):
         scores.sort(reverse=True)
         return sum(scores[:self.BULLET_COVERAGE_CAP])
 
-    def _special_defense_bonus(self, curr: GameState) -> float:
-        remaining = curr.special_squares - curr.captured_squares
-        if not remaining or not curr.projectiles:
+    @staticmethod
+    def _newly_fired_bullet(prev: GameState, curr: GameState):
+        expected = set()
+        for (px, py), (dx, dy) in prev.projectiles:
+            nxt = (px + dx, py + dy)
+            if 0 <= nxt[0] < BOARD_SIZE and 0 <= nxt[1] < BOARD_SIZE:
+                expected.add((nxt, (dx, dy)))
+        for entry in curr.projectiles:
+            if entry not in expected:
+                return entry
+        return None
+
+    def _special_defense_bonus(self, prev: GameState, curr: GameState) -> float:
+        new_bullet = self._newly_fired_bullet(prev, curr)
+        if new_bullet is None:
             return 0.0
-        qualifying = 0
-        for (px, py), (dx, dy) in curr.projectiles:
-            for k in range(1, self.SPECIAL_DEFENSE_LOOKAHEAD + 1):
-                cell = (px + k * dx, py + k * dy)
-                if cell in remaining and self._runner_reaches_in_one(curr, cell):
-                    qualifying += 1
+        _, (dx, dy) = new_bullet
+        cx, cy = prev.catcher_pos
+        remaining = curr.special_squares - curr.captured_squares
+
+        if remaining:
+            for k in range(1, self.SPECIAL_DEFENSE_NEAR_MAX + 1):
+                cell = (cx + k * dx, cy + k * dy)
+                if not (0 <= cell[0] < BOARD_SIZE and 0 <= cell[1] < BOARD_SIZE):
                     break
-            if qualifying >= self.SPECIAL_DEFENSE_CAP:
-                break
-        return self.SPECIAL_DEFENSE_COEFF * qualifying
+                if cell in remaining and self._runner_reaches_in_one(prev, cell):
+                    return self.SPECIAL_DEFENSE_COEFF
+
+            for k in range(self.SPECIAL_DEFENSE_FAR_MIN, self.SPECIAL_DEFENSE_FAR_MAX + 1):
+                cell = (cx + k * dx, cy + k * dy)
+                if not (0 <= cell[0] < BOARD_SIZE and 0 <= cell[1] < BOARD_SIZE):
+                    break
+                if cell in remaining and self._runner_reaches_in_exactly_two(prev, cell):
+                    return self.SPECIAL_DEFENSE_COEFF
+
+        return -self.BULLET_SPAM_PENALTY
 
     def _compute(self, prev_state: GameState, curr_state: GameState, base_reward: float) -> float:
         return (base_reward
                 + self._capture_block_penalty(prev_state, curr_state)
                 + self._distance_closure_bonus(curr_state)
                 + self._bullet_coverage_bonus(curr_state)
-                + self._special_defense_bonus(curr_state))
+                + self._special_defense_bonus(prev_state, curr_state))
