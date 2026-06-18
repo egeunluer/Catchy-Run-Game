@@ -18,7 +18,7 @@ from catchy_run.catchy_run_game.engine import Agent
 RUNNER_COMPONENTS = ["base", "alive", "capture", "catcher", "projectile",
                      "attraction", "sprint_waste", "urgency", "unsafe_capture"]
 
-CATCHER_COMPONENTS = ["base", "capture_block", "distance_closure", "bullet_coverage"]
+CATCHER_COMPONENTS = ["base", "special_defense", "special_blocking", "time_advantage", "chase"]
 
 
 def _runner_step_dict(shaper, prev, curr, base):
@@ -42,9 +42,10 @@ def _catcher_step_dict(shaper, prev, curr, base):
         "turn": curr.turn,
         "captured": len(curr.captured_squares),
         "base": base,
-        "capture_block": shaper._capture_block_penalty(prev, curr),
-        "distance_closure": shaper._distance_closure_bonus(curr),
-        "bullet_coverage": shaper._bullet_coverage_bonus(curr),
+        "special_defense": shaper._special_defense_bonus(prev, curr),
+        "special_blocking": shaper._special_blocking_attraction(curr),
+        "time_advantage": shaper._time_advantage_bonus(curr),
+        "chase": shaper._chase_bonus(prev, curr),
     }
 
 
@@ -148,9 +149,10 @@ def trace_single_episode(seed: int = 0, trainee_role: Agent = "runner"):
             parts = [
                 f"turn={curr.turn:2d}",
                 f"cap={len(curr.captured_squares)}",
-                f"capture_block={shaper._capture_block_penalty(prev, curr):+.3f}",
-                f"dist_closure={shaper._distance_closure_bonus(curr):+.3f}",
-                f"bullet_cov={shaper._bullet_coverage_bonus(curr):+.3f}",
+                f"special_defense={shaper._special_defense_bonus(prev, curr):+.3f}",
+                f"special_blocking={shaper._special_blocking_attraction(curr):+.3f}",
+                f"time_advantage={shaper._time_advantage_bonus(curr):+.3f}",
+                f"chase={shaper._chase_bonus(prev, curr):+.3f}",
                 f"=> {result:+.3f}",
             ]
         print("  ".join(parts))

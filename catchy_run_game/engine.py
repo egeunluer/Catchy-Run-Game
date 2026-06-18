@@ -361,7 +361,7 @@ def encode_observation(state: GameState, perspective: Agent) -> np.ndarray:
         0: own position (one-hot)
         1: opponent position (one-hot)
         2: Chebyshev distance between agents (normalized scalar broadcast)
-        3: own sprint charges remaining (normalized scalar broadcast)
+        3: runner sprint charges remaining (normalized scalar broadcast)
         4: turn number (normalized scalar broadcast)
         5: projectile presence mask (1.0 at each in-flight bullet's cell)
         6: projectile direction dx at each bullet cell, in {-1, 0, +1}
@@ -371,9 +371,11 @@ def encode_observation(state: GameState, perspective: Agent) -> np.ndarray:
     `perspective` swaps own / opponent position channels so a single network
     can play either role. Coordinates: array is indexed [channel, y, x].
 
-    Channel 3 is the runner's sprint counter. The catcher has no depletable
-    resource (shoot is unlimited), so under the catcher perspective this
-    channel is constant 0.
+    Channel 3 carries the runner's sprint counter under both perspectives —
+    own resource from the runner's view, opponent's resource from the
+    catcher's view. The catcher has no depletable resource of its own
+    (shoot is unlimited), so this channel is the only depletable resource on
+    the board and the catcher needs to see it to make sprint-aware decisions.
     """
     if perspective not in ("runner", "catcher"):
         raise ValueError(f"perspective must be 'runner' or 'catcher', got {perspective!r}")
@@ -385,7 +387,7 @@ def encode_observation(state: GameState, perspective: Agent) -> np.ndarray:
         own_charges_norm = state.sprint_charges / max(SPRINT_CHARGES, 1)
     else:
         own_pos, opp_pos = state.catcher_pos, state.runner_pos
-        own_charges_norm = 0.0
+        own_charges_norm = state.sprint_charges / max(SPRINT_CHARGES, 1)  # was 0.0
 
     chebyshev_norm = _chebyshev(state.runner_pos, state.catcher_pos) / max(BOARD_SIZE - 1, 1)
 

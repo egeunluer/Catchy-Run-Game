@@ -8,18 +8,23 @@ terminal events can happen mid-episode (a kill terminates immediately on
 contact), so the credit-assignment problem is shorter and a naive sparse
 catcher will reliably learn the *stepping* part of the game.
 
-The reason the catcher gets shaping anyway is **skill scaffolding for
-projectile tactics**. The bundled heuristic catcher (`agents/heuristic.py`)
-scores every action by the resulting Chebyshev distance to the runner.
-Shooting doesn't move the catcher, so the heuristic only shoots when the
-bullet immediately one-shot-kills — which collapses behaviorally into the
-"step onto the runner" case. A sparse RL catcher trained against the
-heuristic runner will likely arrive at a similar policy: pure chase,
-projectiles almost never used, because random shots usually miss and
+What the sparse signal does **not** teach is the catcher's actual strategic
+job: **area defense**. The bundled heuristic catcher (`agents/heuristic.py`)
+scores every action by the resulting Chebyshev distance to the runner —
+pure chase, projectiles ignored, no awareness of which specials are
+contested. A sparse RL catcher trained against the heuristic runner will
+likely arrive at a similar policy, because random shots usually miss and
 sparse expectation marks them as wasted turns. The shaping signals below
-exist specifically to teach the catcher that **a well-aimed bullet is
-worth firing** even when it doesn't kill that turn — it controls space and
-threatens the runner's chosen path.
+exist specifically to teach the catcher that
+
+1. **a well-aimed bullet is worth firing** even when it doesn't kill — it
+   denies a special the runner is one move from grabbing,
+2. **interposing between the runner and contested specials** beats greedy
+   chase as the *default* behavior — closing only matters when the runner is
+   in striking range, and
+3. **the runner's sprint charges are a depletable resource** — when they're
+   spent, cornering the runner becomes a closing trap rather than a
+   reversible position.
 
 `CatcherRewardShaper` lives alongside `RunnerRewardShaper` in
 `rl_agent/reward_shaping.py`. Both subclass a shared `RewardShaper` base
@@ -30,22 +35,21 @@ construction time based on `trainee_role`.
 
 ## Tunables (class attributes)
 
-| Attribute                       | Value | What it controls                                                                                       |
-|---------------------------------|-------|--------------------------------------------------------------------------------------------------------|
-| `CAPTURE_BLOCK_PENALTY`         | 0.20  | Penalty per special the runner captured this transition. Direct anti-progress signal.                  |
-| `DISTANCE_CLOSURE_COEFF`        | 0.02  | Numerator of the inverse-distance bonus. Small on purpose — terminal kill is the dominant chase signal. |
-| `BULLET_COVERAGE_COEFF`         | 0.10  | Numerator of the per-bullet coverage bonus.                                                            |
-| `BULLET_COVERAGE_CAP`           | 3     | Only the `N` bullets closest to the runner contribute to the coverage bonus. Prevents spam inflation.  |
-| `SPECIAL_DEFENSE_COEFF`         | 0.10  | Flat bonus per bullet whose forward path threatens a special the runner is about to capture.           |
-| `SPECIAL_DEFENSE_LOOKAHEAD`     | 2     | Cells along each bullet's path to scan. Covers cheb 2-3 from the catcher for a freshly fired bullet.   |
-| `SPECIAL_DEFENSE_CAP`           | 2     | At most `N` qualifying items (bullet-path or catcher-ray) contribute to the defense bonus per step.    |
-| `SPECIAL_DEFENSE_RAY_MIN_DIST`  | 4     | Lower Chebyshev bound (inclusive) for the catcher-ray scan that backs up the bullet-path check.        |
-| `SPECIAL_DEFENSE_RAY_MAX_DIST`  | 5     | Upper Chebyshev bound (inclusive) for the catcher-ray scan.                                            |
-
-The runner-threat side of the qualification is no longer a fixed
-Chebyshev radius — it is a structural reach predicate covering both
-step and sprint moves. See the "Special-defense bonus" section below
-for the exact definition.
+| Attribute                       | Value  | What it controls                                                                                       |
+|---------------------------------|--------|--------------------------------------------------------------------------------------------------------|
+| `SPECIAL_DEFENSE_COEFF`         | 0.10   | One-shot reward when a freshly fired bullet's ray covers an imminently-capturable special.             |
+| `SPECIAL_DEFENSE_NEAR_MAX`      | 3      | Inclusive max Chebyshev distance from catcher along the shoot ray for the "runner reaches in 1" check. |
+| `SPECIAL_DEFENSE_FAR_MIN`       | 4      | Inclusive min Chebyshev distance along the shoot ray for the "runner reaches in 2" check.              |
+| `SPECIAL_DEFENSE_FAR_MAX`       | 5      | Inclusive max Chebyshev distance along the shoot ray for the "runner reaches in 2" check.              |
+| `BULLET_SPAM_PENALTY`           | 0.10   | Flat penalty applied on the shoot turn when the new bullet's ray fails both reach checks.              |
+| `SPECIAL_BLOCKING_NEAREST`      | 0.10   | Coefficient on the blocking score for the runner's closest remaining special.                          |
+| `SPECIAL_BLOCKING_SECOND`       | 0.05   | Coefficient on the blocking score for the runner's second-closest remaining special.                   |
+| `TIME_ADVANTAGE_COEFF`          | 0.005  | Per-step coefficient mirroring the runner's `URGENCY_COEFF` with opposite sign.                        |
+| `CHASE_COEFF`                   | 0.20   | Numerator of the heavy close-range proximity bonus (catcher within `DANGER_RADIUS` and closing).       |
+| `PROXIMITY_COEFF`               | 0.015  | Numerator of the light ambient proximity bonus (everywhere else).                                      |
+| `CORNERING_COEFF`               | 0.015  | Numerator of the steady cornering bonus, scaled by `corner_score · sprint_pressure`.                   |
+| `CORNER_SPRINT_BOOST`           | 0.5    | Multiplier on the sprint-pressure ramp. At zero sprints, cornering pays `1 + 0.5 = 1.5×` its base.     |
+| `DANGER_RADIUS`                 | 2      | Chebyshev radius inside which the chase branch fires; symmetric with the runner's `DANGER_RADIUS`.     |
 
 Distances are **Chebyshev** throughout, matching the engine's 8-directional
 movement (one step in any direction equals one unit of Chebyshev distance).
@@ -58,299 +62,338 @@ i.e. `self.state` inside `env.step()`), and the engine's `base` reward:
 
 ```
 shaped = base
-       − CAPTURE_BLOCK_PENALTY · newly_captured                          # anti-progress
-       + DISTANCE_CLOSURE_COEFF / max(1, cheb(runner, catcher))          # distance closure
-       + Σ over top-K bullets:  BULLET_COVERAGE_COEFF / max(1, min(d₁, d₂))   # bullet coverage
-       + SPECIAL_DEFENSE_COEFF · qualifying                              # special defense (bullet-path + catcher-ray)
+       + _special_defense_bonus(prev, curr)         # one-shot per fired bullet
+       + _special_blocking_attraction(curr)         # area-defense positioning
+       + _time_advantage_bonus(curr)                # stall-pressure mirror
+       + _chase_bonus(prev, curr)                   # proximity + cornering
 ```
 
-where `K = BULLET_COVERAGE_CAP` and `d₁`, `d₂` are Chebyshev distances
-from the runner's current position to a bullet's next cell and the cell
-after that. `newly_captured` is `|curr.captured_squares| −
-|prev.captured_squares|` — `0` or `1` per transition.
+Every term short-circuits cleanly to `0` (or near-zero) when its
+preconditions don't apply, so the per-step magnitude breakdown below is the
+right way to read the calibration.
 
 ## Component by component
 
-### Capture-block penalty — `_capture_block_penalty(prev, curr)`
+### Special-defense bonus / bullet-spam penalty — `_special_defense_bonus(prev, curr)`
+
+This is the *only* signal that fires on bullet firing, and it fires
+**exactly once per bullet** — on the turn the bullet is spawned. There is
+no ongoing reward for in-flight bullets, by design: a defensive shot is a
+decision made at firing time, and the credit should be assigned to that
+decision rather than smeared across every subsequent turn the bullet
+happens to remain in flight.
 
 ```
-−CAPTURE_BLOCK_PENALTY · ( |curr.captured_squares| − |prev.captured_squares| )
+new_bullet = _newly_fired_bullet(prev, curr)
+if new_bullet is None:
+    return 0.0
+(_, (dx, dy)) = new_bullet
+(cx, cy) = prev.catcher_pos
+remaining = curr.special_squares − curr.captured_squares
+
+if remaining:
+    # NEAR scan — runner reachable in 1 turn along the shoot ray
+    for k in 1 .. SPECIAL_DEFENSE_NEAR_MAX:
+        cell = (cx + k·dx, cy + k·dy)
+        if cell out of bounds: break
+        if cell ∈ remaining and runner_reaches_in_one(prev, cell):
+            return +SPECIAL_DEFENSE_COEFF
+
+    # FAR scan — runner reachable in exactly 2 turns along the shoot ray
+    for k in SPECIAL_DEFENSE_FAR_MIN .. SPECIAL_DEFENSE_FAR_MAX:
+        cell = (cx + k·dx, cy + k·dy)
+        if cell out of bounds: break
+        if cell ∈ remaining and runner_reaches_in_exactly_two(prev, cell):
+            return +SPECIAL_DEFENSE_COEFF
+
+return -BULLET_SPAM_PENALTY
 ```
 
-The runner's progress is the catcher's anti-progress. This is the most
-direct mid-episode signal that something the catcher could have prevented
-just happened. The magnitude (`0.20`) is chosen to roughly mirror the
-runner's `CAPTURE_BONUS = 0.24` — a special captured costs the catcher
-about what it pays the runner. We keep it slightly smaller than the
-runner's bonus so the terminal `±1` still dominates over an episode (a
-catcher conceding all 7 specials still only accumulates `−1.4` from this
-term across the whole episode, comparable but below the `+1` if it
-somehow wins anyway, e.g. by timeout — terminal dominance preserved).
+**Newly-fired bullet detection.** No need to thread the action through the
+shaper — `_newly_fired_bullet` advances every entry in `prev.projectiles`
+one step in its own direction and treats any entry in `curr.projectiles`
+not in that expected set as the freshly spawned bullet. When no shoot
+happened this turn, the function returns `None` and the bonus short-circuits
+to `0`. The detection is symmetric with the engine's logic: the bullet
+spawns at `prev.catcher_pos` and is advanced one cell by `_tick_projectiles`
+the same turn, so its `curr` position is always `(catcher + dir)` with its
+direction equal to the chosen shoot direction.
 
-### Distance closure bonus — `_distance_closure_bonus(curr)`
+**Why catcher coords, not bullet coords.** The two scan ranges are
+expressed in Chebyshev distance from the catcher, not from the bullet's
+post-tick position. This is cleaner for two reasons: (1) the catcher is the
+agent making the decision, and (2) the relevant geometry of "the runner
+reaches this cell in one or two turns" is most naturally indexed against
+the firing point. The constants `NEAR_MAX = 3` and `FAR_MIN/MAX = 4/5` are
+chosen to mesh with the runner's reach geometry: a 1-turn runner reach
+extends ~3 cells from the runner's current position via sprint, and a
+2-turn reach extends ~5 cells. Specials further out than `FAR_MAX = 5`
+along the shoot ray are too distant for the runner to credibly capture
+before the bullet arrives or the catcher can move.
 
-```
-+DISTANCE_CLOSURE_COEFF / max(1, cheb(curr.runner_pos, curr.catcher_pos))
-```
+**Why the spam penalty matches the bonus magnitude.** With both signals at
+`0.10` the catcher gets a *symmetric* incentive: a good shot pays the same
+as a bad shot costs. A catcher that fires randomly nets zero in
+expectation, but the squared variance increases — random shots are
+strictly worse than not shooting at all. The catcher learns to fire only
+when it has identified a defensive opportunity. If you observe the
+catcher under-shooting in training, raise the bonus or lower the penalty
+asymmetrically; if you observe spam, do the reverse.
 
-A small inverse-distance bonus so the gradient pulls the catcher toward
-the runner during early training. The terminal kill reward already
-provides the strong "be close" signal; this is just denser feedback to
-speed up early convergence. **The magnitude is deliberately tiny** — too
-large and the catcher learns to chase greedily and never shoots,
-recapitulating the exact heuristic failure mode this shaper exists to
-escape. At cheb 1 the bonus is `+0.02`; at cheb 6 it's `≈ +0.0033`. Both
-are far below the bullet-coverage and capture-block magnitudes, ensuring
-distance closure doesn't out-vote projectile tactics.
+**The `runner_reaches_in_one` / `runner_reaches_in_exactly_two` predicates.**
+Both are structural rather than radius-based, because sprint is
+cardinal-only with charge and path constraints — a generic Chebyshev
+radius would over-count diagonals and under-count cardinal-3 cells.
+See `_runner_reaches_in_one` and `_runner_reaches_in_exactly_two` in
+`reward_shaping.py` for the exact code; the gist is "enumerate every
+legal first move the runner can make and check whether the target is
+reachable from there given remaining sprint charges and catcher-blocking."
+The reach predicates use `prev` because both the runner's position and
+sprint count are unchanged across the catcher's half-turn anyway, and
+`prev` is conceptually the state at firing time.
 
-The `max(1, …)` clamp is a safety guard — non-terminal states already
-satisfy `cheb ≥ 1`, but the clamp makes the term robust if the engine
-ever exposes a `0`-distance transitional state.
+### Special-blocking attraction — `_special_blocking_attraction(curr)`
 
-### Bullet coverage bonus — `_bullet_coverage_bonus(curr)`
-
-```
-for each (px, py), (dx, dy) in curr.projectiles:
-    next_cell  = (px +   dx, py +   dy)
-    next2_cell = (px + 2·dx, py + 2·dy)
-    d₁ = cheb(curr.runner_pos, next_cell)
-    d₂ = cheb(curr.runner_pos, next2_cell)
-    score_b = BULLET_COVERAGE_COEFF / max(1, min(d₁, d₂))
-
-bonus = sum of the top BULLET_COVERAGE_CAP scores
-```
-
-This is the **structural mirror** of the runner's projectile threat
-penalty (`reward_shaping.py: _projectile_threat_penalty`). Both terms
-sample each bullet's next two cells (one cell per half-turn of travel) and
-take the smaller Chebyshev distance to the runner. From the catcher's
-perspective, a bullet whose imminent path passes close to the runner is a
-*credible threat* — even if it doesn't kill, it constrains the runner's
-movement next turn.
-
-Why sample both `next_cell` and `next2_cell` — and why `min`? Two ticks
-of look-ahead matches the runner's threat penalty exactly, so the
-catcher and runner are scoring the same situations symmetrically.
-`min(d₁, d₂)` rewards the cell where the bullet is closest to the runner
-within the lookahead window — the bullet doesn't have to be threatening
-the runner *now*, just *soon*.
-
-**The cap (`BULLET_COVERAGE_CAP = 3`) is essential.** Shoot is unlimited
-in the engine. Without the cap, a catcher could learn to spam shots to
-inflate the shaping bonus rather than to actually pressure the runner.
-Capping at the three closest bullets keeps the per-step contribution
-bounded at roughly `3 · 0.10 = 0.30` even in the pathological "every
-bullet sitting on the runner" case. Three is enough to credit multi-shot
-coverage of distinct runner-escape lanes but small enough to make spam
-non-productive.
-
-The cap is implemented by sorting per-bullet scores descending and
-summing the prefix — bullets that are *closer* to the runner contribute
-preferentially.
-
-### Special-defense bonus — `_special_defense_bonus(curr)`
-
-The bonus pools two categories of qualifying items into a single
-shared cap (`SPECIAL_DEFENSE_CAP`). The bullet-path scan runs first;
-if it doesn't saturate the cap, the catcher-ray scan tops it up.
+This is the per-step **area-defense** signal — the catcher's positional
+objective. It tries to teach the catcher to interpose between the runner
+and the runner's likely next targets.
 
 ```
-qualifying = 0
-
-# (A) Bullet-path scan — imminent threats already in flight.
-for each bullet (px, py), (dx, dy) in curr.projectiles:
-    for k in 1 .. SPECIAL_DEFENSE_LOOKAHEAD:
-        cell = (px + k·dx, py + k·dy)
-        if cell is an uncaptured special
-           and runner can reach cell in one turn (step or legal sprint):
-            qualifying += 1
-            break       # count each bullet at most once
-    if qualifying ≥ SPECIAL_DEFENSE_CAP:
-        break
-
-# (B) Catcher-ray scan — "good shot is available" on a slightly
-# slower threat, independent of whether a bullet exists yet.
-if qualifying < SPECIAL_DEFENSE_CAP:
-    for (dx, dy) in DIRECTIONS_8:
-        for k in SPECIAL_DEFENSE_RAY_MIN_DIST .. SPECIAL_DEFENSE_RAY_MAX_DIST:
-            cell = (catcher_x + k·dx, catcher_y + k·dy)
-            if cell out of bounds:
-                continue
-            if cell is an uncaptured special
-               and runner can reach cell in exactly two turns:
-                qualifying += 1
-                break       # count each direction at most once
-        if qualifying ≥ SPECIAL_DEFENSE_CAP:
-            break
-
-bonus = SPECIAL_DEFENSE_COEFF · qualifying
+remaining = list(curr.special_squares − curr.captured_squares)
+if not remaining: return 0.0
+remaining.sort(key=λ s: cheb(s, curr.runner_pos))
+targets = remaining[:2]
+weights = (SPECIAL_BLOCKING_NEAREST, SPECIAL_BLOCKING_SECOND)
+return Σ w · blocking_score(curr.runner_pos, curr.catcher_pos, s)
+       for (w, s) in zip(weights, targets)
 ```
 
-The "runner can reach in one turn" predicate is encoded directly
-rather than as a Chebyshev radius:
+**Target selection.** The two specials are picked by their Chebyshev
+distance to the **runner**, with no safety filter. This is deliberate: if
+we mirrored the runner's "safe from catcher" filter, we'd create circular
+coupling ("I'm rewarded for blocking S only when S is far from me, but the
+reward pulls me toward S"). Ranking by runner-distance alone gives the
+right adaptation signal — as the runner moves, the top-2 list updates
+every step, so the catcher's pull naturally shifts to wherever the runner
+is heading next. When the catcher blocks the closest target effectively
+and the runner pivots toward a different special, the new closest special
+rises in the ranking and the catcher's signal redirects.
+
+**Blocking score.** The function `_blocking_score(runner, catcher, s)`
+expresses "how well does the catcher sit between R and S" via the
+Chebyshev triangle inequality:
 
 ```
-runner_reaches_in_one(state, target):
-    if cheb(state.runner_pos, target) ≤ 1:
-        return True                              # 8-directional step
-    if state.sprint_charges ≤ 0:
-        return False
-    dx, dy = target − state.runner_pos
-    if not ((dx == 0 and |dy| == 3) or (dy == 0 and |dx| == 3)):
-        return False                             # sprint is cardinal-3 only
-    one_ahead = state.runner_pos + sign(dx, dy)
-    if one_ahead == state.catcher_pos:           # sprint path blocked
-        return False
-    if target == state.catcher_pos:              # destination blocked
-        return False
-    return True
+rc = cheb(runner, catcher)
+cs = cheb(catcher, s)
+rs = cheb(runner, s)
+slack         = rc + cs − rs            # 0 iff catcher on a shortest R→S path
+lead_deficit  = max(0, cs − rs)         # >0 iff runner reaches s strictly first
+score         = 1 / (1 + slack + lead_deficit)
 ```
 
-This term exists because the bullet-coverage bonus rewards proximity to
-the runner directly — it pulls the catcher into "shoot wherever the
-runner is moving" behavior. But the runner's actual *goal* is the special
-squares, not the squares it currently occupies. A well-played catcher
-shouldn't only chase the runner; it should pre-fire onto contested
-specials when the runner is one step from capturing them.
+`slack` measures how far the catcher is "off the path" from the runner to
+the special — the triangle inequality guarantees `slack ≥ 0`, with
+equality iff the catcher sits on some Chebyshev geodesic from `runner` to
+`s`. `lead_deficit` measures how badly the catcher loses the race to
+`s` — `0` if the catcher arrives first or ties, positive (and equal to the
+gap) if the runner arrives first.
 
-The qualification check has three parts and all three must hold:
+The reciprocal shape `1 / (1 + slack + lead_deficit)` yields a smooth,
+bounded score in `(0, 1]`. Peak at `1.0` when the catcher is on-path
+**and** arrives at `s` no later than the runner. One cell off path → `0.5`.
+Three steps behind on the race → `0.25`. The shape is deliberately gentle
+because the runner makes decisions on partial information; we want the
+catcher to *prefer* the perfect interpose spot but not be penalized to
+zero for being slightly off.
 
-1. **A cell on the bullet's forward path** within `SPECIAL_DEFENSE_LOOKAHEAD`
-   cells. Since bullets only travel in the 8 cardinal/diagonal
-   directions, this is automatically equivalent to "the special is on
-   one of the 8 rays from the bullet's current position" — the
-   "shootable direction" requirement.
-2. **That cell is an uncaptured special.** Captured specials don't need
-   defending.
-3. **The runner can reach that cell in one turn**, by either an
-   8-directional step (`cheb(runner, cell) ≤ 1`) or a *legal* sprint.
-   A sprint is legal when `sprint_charges > 0`, the move is a cardinal
-   3-cell jump, the one-cell-ahead cell isn't occupied by the catcher,
-   and the destination cell isn't occupied by the catcher. Sprint is
-   included because a sprint-reachable special is just as imminently
-   capturable as a step-reachable one — both are "one move away" by
-   the engine's action set, and the catcher should treat them
-   symmetrically when deciding where to fire. The predicate is
-   encoded directly rather than as a Chebyshev radius because sprint
-   is cardinal-only with charge and path constraints: a generic
-   radius would over-count (it would include diagonals at distance 2
-   and 3, which sprint cannot reach) and under-count (it would miss
-   the cardinal-3 cells that sprint *can* reach unless the radius is
-   widened, in which case it picks up everything in between). The
-   predicate also refuses to mark a special as threatened when the
-   runner physically cannot sprint to it next turn (catcher blocks
-   the path, no charges remaining), so the bonus only fires for
-   shots aimed at specials the runner could *actually* land on.
+**Additive over the two targets.** A position that partially blocks both
+top-2 specials beats a position that perfectly blocks one and ignores the
+second. If the top-2 lie in the same direction from the runner, the
+catcher's optimal pose maximizes both at once. If they're on opposite
+sides, the optimal pose is a compromise — exactly the "split the
+difference" reasoning a strategic catcher should learn.
 
-For a *freshly fired* bullet (current position `catcher + dir`), the
-`LOOKAHEAD = 2` window scans cells at cheb 2 and 3 from the catcher — so
-the bonus fires for shots aimed at specials 2 or 3 squares away in any
-of the 8 directions, provided the runner is poised to capture them. For
-*older* bullets in flight, the same lookahead scans the next two cells
-of the bullet's trajectory regardless of where the catcher now stands.
+**Magnitudes.** At peak score (both targets perfectly blocked) the per-step
+reward is `0.10 + 0.05 = 0.15`, well above any other per-step term in the
+shaper. This is intentional and reflects the design decision that area
+defense is the catcher's *core* strategy. Lower these values if you find
+the catcher refusing to commit to kills even at close range.
 
-This lookahead matches the sprint geometry cleanly: sprint-reachable
-specials sit at cardinal distance 3 from the runner, and a bullet
-aimed cardinally at such a special will land its second forward cell
-on the special when fired from cheb-distance 3 — so the predicate's
-sprint clause and the lookahead window cover the same shots without
-extra tuning.
+### Chase bonus — `_chase_bonus(prev, curr)`
 
-**Catcher-ray supplement.** The bullet-path scan only fires when the
-catcher has *already* committed a bullet whose forward two cells land
-on a runner-1-reachable special. That misses a class of situations the
-shaper wants to credit: the catcher is standing 4-5 cells from an
-uncaptured special on one of its 8 firing rays, and the runner is two
-moves away from that special. The shot isn't fired yet, but the
-*shot is available* — a SHOOT action in that direction this turn would
-plant a bullet whose next cells track straight into the contested
-square. Without this supplement the sparse expectation marks such
-"setup" turns as wasted, exactly the failure mode this shaper exists
-to prevent.
+The chase bonus is one function returning a sum of two sub-signals:
+**proximity** (with chase-direction gating) and **cornering** (with
+sprint-pressure scaling). They're kept in the same function because both
+condition on the runner's position and the catcher–runner geometry, and
+because they're calibrated together against the blocking magnitude.
 
-The supplement scans the catcher's 8 rays at cheb 4 and 5 and counts a
-direction as qualifying when the cell on the ray is an uncaptured
-special the runner can reach in *exactly* two turns (the
-`_runner_reaches_in_exactly_two` predicate). The "exactly two" half is
-load-bearing — 1-reach cells are already covered by the bullet-path
-scan, and 3+ reach is too distant to credibly pressure right now.
-"Exactly two" is computed by enumerating the runner's 12 legal first
-moves (8 steps + 4 sprints, respecting bounds, catcher-blocking, and
-sprint charges, with the +1 charge if the first move lands on a
-special), and asking whether any of those intermediate positions
-yields a 1-turn reach onto the target assuming the catcher stays put.
-Catcher-side movement is approximated as stationary because the
-shaping signal is about the catcher's *opportunity now*, not a
-guaranteed kill.
+```
+catcher_move_dist = cheb(curr.catcher_pos, prev.runner_pos)
+delta             = catcher_move_dist − cheb(prev.catcher_pos, prev.runner_pos)
+current_dist      = cheb(curr.runner_pos, curr.catcher_pos)
 
-The `[4, 5]` window is chosen to mesh with the lookahead window of the
-bullet scan and the geometry of a 2-move runner reach. Runner-2-reach
-cells live at cheb 2 from the runner (two steps), or cheb up to ~4 if
-sprint is involved; with the runner and catcher separated by a
-typical mid-board distance, the contested cells sit at cheb 4-5 from
-the catcher. Below 4 those cells would already qualify under
-"runner-1-reach" via the bullet path scan if a bullet were on the way;
-above 5 the catcher's shot takes too long to arrive relative to a
-2-move runner. Counting each direction at most once mirrors the
-"count each bullet at most once" pattern from the bullet-path scan.
+if current_dist ≤ DANGER_RADIUS and delta < 0:
+    proximity = CHASE_COEFF / current_dist
+else:
+    proximity = PROXIMITY_COEFF / max(1, current_dist)
 
-The two categories share the cap (`SPECIAL_DEFENSE_CAP = 2`), so the
-per-step ceiling on this term remains `+0.20`. The bullet-path scan
-runs first; the ray supplement only contributes if the bullet-path
-scan didn't already saturate the cap. That ordering makes the cap
-soak up the supplement's added qualifying frequency without inflating
-the worst-case contribution — the calibration math in the next
-section is unchanged.
+rx, ry          = curr.runner_pos
+edge_dist       = min(rx, BOARD_SIZE − 1 − rx) + min(ry, BOARD_SIZE − 1 − ry)
+corner_score    = 1.0 − edge_dist / (BOARD_SIZE − 1)
+sprint_pressure = 1.0 + CORNER_SPRINT_BOOST · (1.0 − curr.sprint_charges / SPRINT_CHARGES)
+cornering       = CORNERING_COEFF · corner_score · sprint_pressure
 
-Why a flat per-bullet bonus instead of an inverse-distance formula like
-the coverage term? The defense condition is binary: either the bullet
-threatens a runner-imminent special or it doesn't. There's no "almost
-defending" a special — the bullet is either on a defensive line or it
-isn't. A flat bonus reflects this cleanly without spuriously rewarding
-near-misses.
+return proximity + cornering
+```
 
-The cap (`SPECIAL_DEFENSE_CAP = 2`) bounds the per-step contribution at
-`2 · 0.10 = +0.20` even when multiple bullets happen to converge on
-multiple contested specials simultaneously, keeping the term from
-runaway-rewarding chaotic mid-game bullet clouds. The cap also
-absorbs the modest increase in qualifying frequency introduced by the
-sprint clause: more cells satisfy part 3 per turn — especially in the
-early game when the runner has all 3 sprint charges and several
-cardinal-3 lines into uncaptured specials — but the per-step
-contribution is still bounded at `+0.20`, so the calibration math in
-the next section is unchanged.
+**Proximity branch — chase-direction gating.** The strict dual of the
+runner's `_catcher_distance_rewarding`. Two regimes:
+
+- **Close-range chase**: `cheb ≤ DANGER_RADIUS = 2` *and* the catcher
+  moved closer this half-turn. Reward: `+CHASE_COEFF / cheb`, peak
+  `+0.20` at `cheb = 1`. This is the "commit to the kill" signal — the
+  catcher gets a strong reward only when it's in striking range *and*
+  actually committed by closing.
+- **Ambient pull**: anywhere else, including close-range without
+  closing motion. Reward: `+PROXIMITY_COEFF / max(1, cheb)`, in
+  `[+0.0025, +0.015]` per step. This is a small constant gradient pulling
+  the catcher toward the runner everywhere on the board, so the policy
+  never fully drifts off into pure-blocking mode.
+
+The chase-direction check uses the catcher's pre-move distance to the
+runner's pre-move position vs. the post-move distance to the same target.
+Negative delta means the catcher closed in. This is the catcher-side
+mirror of the runner's "didn't retreat" check: the catcher has to *act
+on* the proximity, not just be passively close, to earn the heavy reward.
+
+**Why these magnitudes.** At `cheb = 1` (committed chase) the proximity
+reward is `+0.20`, above the blocking-attraction peak of `+0.15`. So the
+strategic transition the catcher learns is: by default, position to
+block; once the runner is within `cheb = 1` and the catcher closes, the
+chase reward wins. The crossover point sits around `cheb = 1.33` against
+blocking max — chase wins at `cheb = 1` only, blocking wins everywhere
+else. This preserves the "block-by-default, kill-on-opportunity" intent.
+
+**Cornering branch — area-control with sprint awareness.** The
+`corner_score` is `1.0` at any of the four corners of the 7×7 board
+(`(0,0), (0,6), (6,0), (6,6)`), `0.0` at the center `(3,3)`, and varies
+smoothly elsewhere. Formula:
+`corner_score = 1 - (min(rx, 6-rx) + min(ry, 6-ry)) / 6`.
+
+This signal is **steady, not derivative** — the catcher is rewarded for
+keeping the runner in a cornered position, not just for pushing the runner
+there once. A derivative-only signal would vanish the moment the runner
+stops moving, but cornering's whole strategic value is that a cornered
+runner has few escape options. The steady form pays while that state
+persists, which is exactly the situation we want the catcher to maintain.
+
+**Sprint-pressure multiplier.** `sprint_pressure` is `1.0` when the
+runner has all 3 sprint charges and `1.5` when the runner has none. The
+linear interpolation means the cornering bonus ramps up smoothly as the
+runner's escape resource drains:
+
+| `sprint_charges` | `sprint_pressure` | Max cornering / step |
+|------------------|-------------------|----------------------|
+| 3 (full)         | 1.0               | `0.015`              |
+| 2                | 1.17              | `0.018`              |
+| 1                | 1.33              | `0.020`              |
+| 0                | 1.5               | `0.023`              |
+
+This is the signal that turns "cornering the runner is mildly good" into
+"cornering the runner is *especially* lethal when their sprints are
+out." The catcher's policy needs to observe the runner's sprint charges
+for this differential signal to actually reach the policy gradient —
+channel 3 of the observation carries that information under the catcher
+perspective specifically for this purpose.
+
+**Why cornering is applied here and not multiplied into chase.** Keeping
+cornering as an independent additive term makes it tunable in isolation
+and means the cornering bonus *biases* the chase direction (toward
+whichever escape lane closes the corner) without overriding the chase
+decision itself. The chase signal is about "should the catcher commit
+now"; the cornering signal is about "which direction should the
+positioning lean." Composing them additively rather than multiplicatively
+keeps those two questions decoupled in the policy gradient.
+
+### Time-advantage bonus — `_time_advantage_bonus(curr)`
+
+The strict dual of the runner's `_urgency_penalty`:
+
+```
+shortfall = SPECIAL_MAJORITY − len(curr.captured_squares)
+if shortfall ≤ 0: return 0.0
+turns_elapsed = curr.turn / TURN_LIMIT
+return +TIME_ADVANTAGE_COEFF · shortfall · turns_elapsed
+```
+
+Where the runner's urgency penalty grows as the runner falls behind on
+captures, the catcher's time-advantage bonus grows by the same magnitude
+with opposite sign. The pedagogical purpose: teach the catcher that
+**stalling counts as winning** when the runner is short of
+`SPECIAL_MAJORITY`. A pure-chase catcher with no shaping might learn to
+greedily pursue the runner all 40 turns; this signal rewards the catcher
+for letting the clock work in its favor when the runner can't catch up.
+
+When the runner has already reached `SPECIAL_MAJORITY` (shortfall ≤ 0), the
+bonus zeros out — there's no advantage to maintain because the runner has
+already crossed the win threshold by captures.
+
+**Magnitudes.** Per-step peak is `0.005 · 4 · 1.0 = 0.02` on turn 40
+when the runner has captured nothing. Per-episode cumulative ceiling
+(linear ramp): `Σ_{t=1}^{40} 0.005 · 4 · (t/40) ≈ 0.41`. Comparable to
+the runner's urgency penalty worst case, as intended.
 
 ## Why these magnitudes (calibration)
 
-A few worst-case sums to confirm the shaping never out-votes the terminal
-`±1`:
+Per-step magnitudes by signal:
 
-- **Per-step ceiling.** Catcher adjacent to runner (closure `+0.02`),
-  three bullets each one cell from the runner's next-tick path (coverage
-  `+0.30`), two bullets simultaneously threatening contested specials
-  (defense `+0.20`), no capture this transition: shaping `≈ +0.52`. Still
-  below the `+1` terminal kill reward — a kill remains more rewarding
-  than maintaining maximum pressure. In practice the coverage and
-  defense terms rarely both saturate, since the bullets that maximize
-  one tend not to maximize the other.
-- **Per-step floor.** Catcher far from runner (closure `≈ +0.003` at
-  cheb 6), no bullets in flight, runner captured a special
-  (`−0.20`): shaping `≈ −0.20`. Above the `−1` terminal loss.
-- **Per-episode cumulative.** Worst-case capture conceded: `7 · (−0.20)
-  = −1.4`, but a 7-capture episode terminates in the runner's favor with
-  base reward `−1`, total `≈ −2.4`. Still firmly in the "lose"
-  direction — shaping doesn't flip a losing trajectory positive. Best
-  case (catcher chases close throughout, maintains coverage, kills mid
-  episode): `~20 · (0.02 + 0.30) = +6.4` is the rough upper bound of
-  shaping, but this requires sustained adjacency AND 3 bullets close to
-  the runner every single step, which is practically unreachable. A
-  realistic active-kill episode accumulates maybe `+0.5` of shaping
-  before terminating with `+1`, total `≈ +1.5` — still clearly a "win"
-  signal, with the terminal share dominant.
+| Signal                           | Min       | Max       | Typical range            |
+|----------------------------------|-----------|-----------|--------------------------|
+| `_special_defense_bonus`         | `-0.10`   | `+0.10`   | `0` (no shoot this turn) |
+| `_special_blocking_attraction`   | `0.0`     | `+0.15`   | `+0.05` to `+0.12`       |
+| `_chase_bonus` (proximity only)  | `+0.0025` | `+0.20`   | `+0.005` to `+0.015`     |
+| `_chase_bonus` (cornering only)  | `0.0`     | `+0.0225` | `+0.003` to `+0.012`     |
+| `_time_advantage_bonus`          | `0.0`     | `+0.02`   | `+0.005` to `+0.015`     |
 
-Terminal dominance is the property we care about: at no point does
-positive shaping reward a sequence of moves that loses the game more than
-the engine rewards winning it.
+**Per-step ceiling (pathological).** Catcher chasing at `cheb = 1` and
+closing (`+0.20` proximity), runner in a corner with zero sprints
+(`+0.0225` cornering), both blocking targets at peak score (`+0.15`
+blocking), runner on zero captures at turn 40 (`+0.02` time advantage),
+and a qualifying shoot this turn (`+0.10` defense): total `≈ +0.49`.
+Below the `+1` terminal kill reward — closing the kill remains more
+rewarding than maintaining pressure, even at maximum theoretical pressure.
+
+**Per-step floor.** Catcher far from runner (`+0.003` proximity at
+`cheb = 6`), runner mid-board (`0` cornering), no blocking opportunity
+(`0` blocking — happens when no specials remain), spam shot
+(`-0.10` defense): total `≈ -0.10`. Above the `-1` terminal loss.
+
+**Per-episode cumulative.** Worst case for a stalling catcher that wins
+on timeout: blocking averages ~`+0.075`/step, cornering ~`+0.01`/step,
+proximity ~`+0.005`/step, time-advantage averages ~`+0.005`/step (linear
+ramp from 0 to 0.02), defense net ~`0` (catcher shoots sparingly and
+well). Sum over 40 steps: `40 · 0.095 ≈ +3.8`. Plus the timeout terminal
+reward of `+1`, total `≈ +4.8`. This is several times the terminal
+magnitude, but the *gradient direction* still aligns with winning — every
+component is calibrated so its sign matches the win/lose verdict, which
+is what governs policy convergence in PPO.
+
+If you want a tighter signal-to-terminal ratio, scale all per-step
+coefficients uniformly (e.g. by 0.65); the strategic crossovers between
+signals are preserved because they depend on coefficient *ratios*, not
+absolute magnitudes.
+
+**The terminal-dominance question for shaped catchers** is slightly more
+subtle than for the runner. The catcher has two winning conditions: kill
+(immediate `+1` mid-episode) and timeout (`+1` at turn 40 with runner
+below majority). The shaping is designed so the *gradient* toward both
+wins is consistent — chase signals reward kill trajectories, blocking
+and time-advantage signals reward timeout trajectories — but a catcher
+that learns to stall when it's "winning the timeout race" will rationally
+forego risky kill attempts. That's by design: the catcher should prefer
+a near-certain timeout to a 50/50 kill attempt, and the magnitudes encode
+that preference.
 
 ## Integration with the environment
 
@@ -370,5 +413,6 @@ short-circuit, so neither subclass needs to repeat that guard.
 To tune a magnitude, edit the class attribute at the top of
 `CatcherRewardShaper`; no environment changes required. Run
 `rl_agent/trace_rewards.py` with `trainee_role="catcher"` to confirm
-component signs and magnitudes against a trained policy or random
-actions.
+component signs and magnitudes against a trained policy or random actions.
+The trace tool reports the four components (`special_defense`,
+`special_blocking`, `time_advantage`, `chase`) alongside `base`.

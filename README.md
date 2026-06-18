@@ -71,14 +71,14 @@ Indexed `[channel, y, x]`. Shape `(9, 7, 7)`.
 | 0 | Own position (one-hot) |
 | 1 | Opponent position (one-hot) |
 | 2 | Chebyshev distance between agents, normalized broadcast (`max(|dx|, |dy|) / (BOARD_SIZE - 1)`) |
-| 3 | Own sprint charges remaining, normalized broadcast (`sprint_charges / SPRINT_CHARGES`) |
+| 3 | Runner sprint charges remaining, normalized broadcast (`sprint_charges / SPRINT_CHARGES`) — runner sees own resource, catcher sees opponent's resource |
 | 4 | Turn number, normalized broadcast (`turn / TURN_LIMIT`) |
 | 5 | Projectile presence mask — `1.0` at each in-flight bullet's cell |
 | 6 | Projectile direction `dx` at the bullet's cell, in `{-1, 0, +1}` |
 | 7 | Projectile direction `dy` at the bullet's cell, in `{-1, 0, +1}` |
 | 8 | Uncaptured special squares |
 
-Channel 3 carries the runner's sprint counter. The catcher has no depletable resource (shoot is unlimited), so under the catcher perspective this channel is constant 0.
+Channel 3 carries the runner's sprint counter under both perspectives — the runner sees its own resource, the catcher sees its opponent's. The catcher has no depletable resource of its own (shoot is unlimited), so this channel is the only depletable resource on the board, and the catcher's reward shaping conditions on it (cornering pressure ramps up as the runner's sprint pool drains).
 
 Rewards: `±1.0` to the winner / loser on termination, `0.0` on every other step.
 
@@ -97,11 +97,12 @@ The **runner** shaper layers on:
 - urgency penalty: `-URGENCY_COEFF · (SPECIAL_MAJORITY − captured) · (turn / TURN_LIMIT)`, which gives the runner a growing nudge toward the 4-capture win threshold as the clock runs down, and disengages once that threshold is reached,
 - unsafe-capture penalty: flat `-UNSAFE_CAPTURE_PENALTY` when the runner captures a special with `cheb(runner, prev.catcher_pos) ≤ 1`, sized to neutralize the capture bonus so the existing distance penalty dominates the signal on unsafe grabs.
 
-The **catcher** shaper is deliberately lighter — its job is to scaffold projectile tactics that a sparse catcher would otherwise skip (random shots usually miss, so sparse expectation marks them as wasted turns). Three components:
+The **catcher** shaper is built around *area defense* rather than greedy chase. Four components:
 
-- capture-block penalty per special the runner just grabbed (direct anti-progress),
-- small distance-closure bonus (`+COEFF / cheb(runner, catcher)`),
-- bullet-coverage bonus: per in-flight bullet, score `+COEFF / max(1, min(d₁, d₂))` against the runner's current position, summed over the `BULLET_COVERAGE_CAP` closest bullets to prevent spam inflation.
+- **special-defense bonus / bullet-spam penalty**: a one-shot evaluation on the turn a bullet is fired. If the new bullet's ray covers an uncaptured special that the runner is poised to reach (cheb ≤ 3 from catcher with a 1-turn runner reach, or cheb 4–5 with a 2-turn runner reach), the catcher gets `+SPECIAL_DEFENSE_COEFF`. Otherwise the shot is treated as spam: `-BULLET_SPAM_PENALTY`. No further reward accrues from that bullet on subsequent turns, so the catcher cannot pad shaping by hoarding flying bullets.
+- **special-blocking attraction**: each step, identify the two specials closest to the runner (runner's likely next targets — re-ranked every turn). For each target, score the catcher's "between-ness" using the Chebyshev triangle inequality: catcher on the shortest runner→special path *and* at least as close to the special as the runner pays the full coefficient; off-path or lagging positions decay smoothly via `1 / (1 + slack + lead_deficit)`. Weighted `SPECIAL_BLOCKING_NEAREST` (primary) and `SPECIAL_BLOCKING_SECOND` (secondary), additive so a partial-block of both beats a perfect-block of one.
+- **chase bonus**: composite signal mixing proximity and cornering. **Proximity**: heavy `+CHASE_COEFF / cheb` when the catcher is inside `DANGER_RADIUS` *and* moved closer this turn; light `+PROXIMITY_COEFF / cheb` ambient pull otherwise. **Cornering**: steady `+CORNERING_COEFF · corner_score` where `corner_score = 1 - (min(rx, 6-rx) + min(ry, 6-ry)) / 6` peaks at the board corners. Cornering is multiplied by `(1 + CORNER_SPRINT_BOOST · (1 - runner.sprint_charges / SPRINT_CHARGES))`, so the bonus ramps up as the runner's escape resource drains — teaching the catcher that a cornered runner with no sprints is a closing trap.
+- **time-advantage bonus**: strict mirror of the runner's urgency penalty. `+TIME_ADVANTAGE_COEFF · shortfall · (turn / TURN_LIMIT)` where `shortfall = SPECIAL_MAJORITY - captured`. Teaches "stalling counts as winning" when the runner is behind on captures.
 
 All magnitudes are tuned so the engine's terminal `±1` still dominates the win/lose verdict. See `rl_agent/environment_explanations/reward_shaping.md` and `catcher_reward_shaping.md` for the full component-by-component derivations.
 
