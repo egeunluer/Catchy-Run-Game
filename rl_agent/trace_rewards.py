@@ -18,7 +18,7 @@ from catchy_run.catchy_run_game.engine import Agent
 RUNNER_COMPONENTS = ["base", "alive", "capture", "catcher", "projectile",
                      "attraction", "sprint_waste", "urgency", "unsafe_capture"]
 
-CATCHER_COMPONENTS = ["base", "special_defense", "special_blocking", "time_advantage", "chase"]
+CATCHER_COMPONENTS = ["base", "special_defense", "captured_square"]
 
 
 def _runner_step_dict(shaper, prev, curr, base):
@@ -43,9 +43,7 @@ def _catcher_step_dict(shaper, prev, curr, base):
         "captured": len(curr.captured_squares),
         "base": base,
         "special_defense": shaper._special_defense_bonus(prev, curr),
-        "special_blocking": shaper._special_blocking_attraction(curr),
-        "time_advantage": shaper._time_advantage_bonus(curr),
-        "chase": shaper._chase_bonus(prev, curr),
+        "captured_square": shaper._captured_square_penalty(prev, curr),
     }
 
 
@@ -56,7 +54,11 @@ def _components_and_builder(trainee_role: Agent):
 
 
 def run(num_episodes: int = 50, seed: int = 42, trainee_role: Agent = "runner"):
-    env = CatchyRunEnv(trainee_role=trainee_role)
+    if trainee_role == "runner":
+        env = CatchyRunEnv(trainee_role=trainee_role)
+    else:
+        from catchy_run.catchy_run_game.agents.rl_runner import rl_runner_policy
+        env = CatchyRunEnv(trainee_role=trainee_role, opponent_policy=lambda state: rl_runner_policy(state))
     shaper = env.reward_shaper
     rng = np.random.default_rng(seed)
     _, step_builder = _components_and_builder(trainee_role)
@@ -150,9 +152,7 @@ def trace_single_episode(seed: int = 0, trainee_role: Agent = "runner"):
                 f"turn={curr.turn:2d}",
                 f"cap={len(curr.captured_squares)}",
                 f"special_defense={shaper._special_defense_bonus(prev, curr):+.3f}",
-                f"special_blocking={shaper._special_blocking_attraction(curr):+.3f}",
-                f"time_advantage={shaper._time_advantage_bonus(curr):+.3f}",
-                f"chase={shaper._chase_bonus(prev, curr):+.3f}",
+                f"captured_square={shaper._captured_square_penalty(prev, curr):+.3f}",
                 f"=> {result:+.3f}",
             ]
         print("  ".join(parts))
@@ -173,8 +173,8 @@ def trace_single_episode(seed: int = 0, trainee_role: Agent = "runner"):
 
 if __name__ == "__main__":
     # Runner trace example:
-    model_path = "catchy_run_runner_stage0_v1_4_1"
-    trainee_role: Agent = "runner"
+    model_path = "catchy_run/trained_model_checkpoints/catcher_models/catchy_run_catcher_stage1_v0_1.zip"
+    trainee_role: Agent = "catcher"
 
     # Catcher trace example (swap in once a catcher checkpoint exists):
     # model_path = "catchy_run_catcher_stage0_v0"

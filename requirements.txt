@@ -1,0 +1,12 @@
+# Core game engine + renderer
+numpy>=1.26
+pygame>=2.5
+
+# RL training stack (rl_agent/)
+gymnasium>=0.29
+stable-baselines3>=2.3
+sb3-contrib>=2.3
+torch>=2.2
+
+# Tests
+pytest>=8.0

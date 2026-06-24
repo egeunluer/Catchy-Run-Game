@@ -104,19 +104,16 @@ class RunnerRewardShaper(RewardShaper):
 
 
 class CatcherRewardShaper(RewardShaper):
-    SPECIAL_DEFENSE_COEFF = 0.10
+    # --- bullet discipline (kept) ---
+    SPECIAL_DEFENSE_COEFF = 0.10     # reward for a well-aimed defensive bullet
     SPECIAL_DEFENSE_NEAR_MAX = 3
     SPECIAL_DEFENSE_FAR_MIN = 4
     SPECIAL_DEFENSE_FAR_MAX = 5
-    BULLET_SPAM_PENALTY = 0.1
-    SPECIAL_BLOCKING_NEAREST = 0.1
-    SPECIAL_BLOCKING_SECOND = 0.05
-    TIME_ADVANTAGE_COEFF = 0.005
-    CHASE_COEFF = 0.20
-    PROXIMITY_COEFF = 0.015
-    CORNERING_COEFF = 0.015
-    CORNER_SPRINT_BOOST = 0.5
-    DANGER_RADIUS = 2
+    BULLET_SPAM_PENALTY = 0.30       # hard penalty for any other bullet
+
+    # --- primitive task signals ---
+    CATCH_BONUS = 2.0                # standout reward for catching the runner (on top of base +1)
+    CAPTURED_SQUARE_PENALTY = 0.50   # hard penalty per special the runner captures
 
     @staticmethod
     def _runner_reaches_in_one(state: GameState, target: tuple[int, int]) -> bool:
@@ -221,53 +218,24 @@ class CatcherRewardShaper(RewardShaper):
 
         return -self.BULLET_SPAM_PENALTY
 
-    def _blocking_score(self, runner: tuple[int, int], catcher: tuple[int, int], s: tuple[int, int]) -> float:
-        rc = self._cheb(runner, catcher)
-        cs = self._cheb(catcher, s)
-        rs = self._cheb(runner, s)
-        slack = rc + cs - rs
-        lead_deficit = max(0, cs - rs)
-        return 1.0 / (1 + slack + lead_deficit)
+    def _captured_square_penalty(self, prev: GameState, curr: GameState) -> float:
+        newly_captured = len(curr.captured_squares) - len(prev.captured_squares)
+        return -self.CAPTURED_SQUARE_PENALTY * newly_captured
 
-    def _special_blocking_attraction(self, curr: GameState) -> float:
-        remaining = list(curr.special_squares - curr.captured_squares)
-        if not remaining:
-            return 0.0
-        remaining.sort(key=lambda s: self._cheb(s, curr.runner_pos))
-        targets = remaining[:2]
-        weights = (self.SPECIAL_BLOCKING_NEAREST, self.SPECIAL_BLOCKING_SECOND)
-        return sum(
-            w * self._blocking_score(curr.runner_pos, curr.catcher_pos, s)
-            for w, s in zip(weights, targets)
-        )
+    def _is_catch(self, curr: GameState) -> bool:
+        if curr.winner != "catcher":
+            return False  # excludes timeout-by-majority wins
+        if curr.runner_pos == curr.catcher_pos:
+            return True  # step kill
+        return any(p == curr.runner_pos for p, _ in curr.projectiles)  # bullet kill
 
-    def _time_advantage_bonus(self, curr: GameState) -> float:
-        shortfall = SPECIAL_MAJORITY - len(curr.captured_squares)
-        if shortfall <= 0:
-            return 0.0
-        turns_elapsed = curr.turn / TURN_LIMIT
-        return self.TIME_ADVANTAGE_COEFF * shortfall * turns_elapsed
-
-    def _chase_bonus(self, prev: GameState, curr: GameState) -> float:
-        catcher_move_dist = self._cheb(curr.catcher_pos, prev.runner_pos)
-        delta = catcher_move_dist - self._cheb(prev.catcher_pos, prev.runner_pos)
-        current_dist = self._cheb(curr.runner_pos, curr.catcher_pos)
-        if current_dist <= self.DANGER_RADIUS and delta < 0:
-            proximity = self.CHASE_COEFF / current_dist
-        else:
-            proximity = self.PROXIMITY_COEFF / max(1, current_dist)
-
-        rx, ry = curr.runner_pos
-        edge_dist = min(rx, BOARD_SIZE - 1 - rx) + min(ry, BOARD_SIZE - 1 - ry)
-        corner_score = 1.0 - edge_dist / (BOARD_SIZE - 1)
-        sprint_pressure = 1.0 + self.CORNER_SPRINT_BOOST * (1.0 - curr.sprint_charges / SPRINT_CHARGES)
-        cornering = self.CORNERING_COEFF * corner_score * sprint_pressure
-
-        return proximity + cornering
+    def shape(self, prev_state: GameState, curr_state: GameState, base_reward: float) -> float:
+        if curr_state.terminated:
+            bonus = self.CATCH_BONUS if self._is_catch(curr_state) else 0.0
+            return base_reward + bonus
+        return self._compute(prev_state, curr_state, base_reward)
 
     def _compute(self, prev_state: GameState, curr_state: GameState, base_reward: float) -> float:
         return (base_reward
                 + self._special_defense_bonus(prev_state, curr_state)
-                + self._special_blocking_attraction(curr_state)
-                + self._time_advantage_bonus(curr_state)
-                + self._chase_bonus(prev_state, curr_state))
+                + self._captured_square_penalty(prev_state, curr_state))
