@@ -14,8 +14,8 @@ import pickle
 import numpy as np
 import pytest
 
-from catcher_vs_runner import engine
-from catcher_vs_runner.actions import (
+from catchy_run_game import engine
+from catchy_run_game.actions import (
     ACTION_MOVE_E,
     ACTION_MOVE_N,
     ACTION_MOVE_NE,
@@ -36,7 +36,7 @@ from catcher_vs_runner.actions import (
     MOVE_ACTIONS,
     SPECIAL_ACTIONS,
 )
-from catcher_vs_runner.engine import (
+from catchy_run_game.engine import (
     BOARD_SIZE,
     CATCHER_START,
     OBS_CHANNELS,

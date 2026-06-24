@@ -1,5 +1,5 @@
-from catchy_run.catchy_run_game.engine import GameState, SPECIAL_MAJORITY, TURN_LIMIT, BOARD_SIZE, SPRINT_CHARGES
-from catchy_run.catchy_run_game.actions import DIRECTIONS_8, CARDINAL_DIRS
+from catchy_run_game.engine import GameState, SPECIAL_MAJORITY, TURN_LIMIT, BOARD_SIZE, SPRINT_CHARGES
+from catchy_run_game.actions import DIRECTIONS_8, CARDINAL_DIRS
 
 
 class RewardShaper:

@@ -2,8 +2,8 @@ from typing import Optional
 import numpy as np
 import gymnasium as gym
 from gymnasium.utils.env_checker import check_env
-from catchy_run.catchy_run_game import engine as engine
-from catchy_run.rl_agent.reward_shaping import RunnerRewardShaper, CatcherRewardShaper
+from catchy_run_game import engine as engine
+from rl_agent.reward_shaping import RunnerRewardShaper, CatcherRewardShaper
 
 class CatchyRunEnv(gym.Env):
 

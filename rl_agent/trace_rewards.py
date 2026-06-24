@@ -1,7 +1,7 @@
 """Trace reward-shaping components over random episodes.
 
 Run from project root:
-    python3 -m catchy_run.rl_agent.trace_rewards
+    python3 -m rl_agent.trace_rewards
 
 Plays N episodes with a trained policy for the chosen trainee against the
 env's default opponent, intercepts every call to RewardShaper.shape, and prints
@@ -11,8 +11,8 @@ should silently stay zero, no component should dominate the sum.
 """
 import numpy as np
 from sb3_contrib import MaskablePPO
-from catchy_run.rl_agent.environment import CatchyRunEnv
-from catchy_run.catchy_run_game.engine import Agent
+from rl_agent.environment import CatchyRunEnv
+from catchy_run_game.engine import Agent
 
 
 RUNNER_COMPONENTS = ["base", "alive", "capture", "catcher", "projectile",
@@ -57,7 +57,7 @@ def run(num_episodes: int = 50, seed: int = 42, trainee_role: Agent = "runner"):
     if trainee_role == "runner":
         env = CatchyRunEnv(trainee_role=trainee_role)
     else:
-        from catchy_run.catchy_run_game.agents.rl_runner import rl_runner_policy
+        from catchy_run_game.agents.rl_runner import rl_runner_policy
         env = CatchyRunEnv(trainee_role=trainee_role, opponent_policy=lambda state: rl_runner_policy(state))
     shaper = env.reward_shaper
     rng = np.random.default_rng(seed)
@@ -173,7 +173,7 @@ def trace_single_episode(seed: int = 0, trainee_role: Agent = "runner"):
 
 if __name__ == "__main__":
     # Runner trace example:
-    model_path = "catchy_run/trained_model_checkpoints/catcher_models/catchy_run_catcher_stage1_v0_1.zip"
+    model_path = "trained_model_checkpoints/catcher_models/catchy_run_catcher_stage1_v0_1.zip"
     trainee_role: Agent = "catcher"
 
     # Catcher trace example (swap in once a catcher checkpoint exists):

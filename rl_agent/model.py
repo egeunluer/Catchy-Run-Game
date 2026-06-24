@@ -3,10 +3,10 @@ from sb3_contrib.common.wrappers import ActionMasker
 from sb3_contrib.common.maskable.buffers import MaskableRolloutBuffer
 from stable_baselines3.common.callbacks import CheckpointCallback
 
-from catchy_run.rl_agent.environment import CatchyRunEnv
-from catchy_run.rl_agent.opponents import heuristic_opponent
-from catchy_run.rl_agent.custom_cnn import policy_kwargs
-from catchy_run.catchy_run_game.engine import Agent
+from rl_agent.environment import CatchyRunEnv
+from rl_agent.opponents import heuristic_opponent
+from rl_agent.custom_cnn import policy_kwargs
+from catchy_run_game.engine import Agent
 
 def mask_fn(env: CatchyRunEnv):
     """ActionMasker will call this on every step to extract the current action mask."""
@@ -17,7 +17,7 @@ def make_env(trainee_role: Agent):
         env = CatchyRunEnv(trainee_role=trainee_role)
         env.set_opponent_pool([env._default_opponent, heuristic_opponent], weights=[0.1, 0.9])
     else:
-        from catchy_run.catchy_run_game.agents.rl_runner import rl_runner_policy
+        from catchy_run_game.agents.rl_runner import rl_runner_policy
         env = CatchyRunEnv(trainee_role=trainee_role, opponent_policy=lambda state: rl_runner_policy(state))
     env = ActionMasker(env, mask_fn)
     return env
@@ -77,7 +77,7 @@ def train(trainee_role: Agent,
 
 if __name__ == "__main__":
     #Change the signature of this train method to continue from a trained model
-    train(load_from= "catchy_run/trained_model_checkpoints/catcher_models/catchy_run_catcher_stage1_v0_0",total_timesteps= 300000,trainee_role="catcher", save_to="catchy_run/trained_model_checkpoints/catcher_models/catchy_run_catcher_stage1_v0_1", tb_log_name="catcher_stage1_v0_1", ent_coef=0.05, learning_rate=1e-4)
+    train(load_from= "trained_model_checkpoints/catcher_models/catchy_run_catcher_stage1_v0_0",total_timesteps= 300000,trainee_role="catcher", save_to="trained_model_checkpoints/catcher_models/catchy_run_catcher_stage1_v0_1", tb_log_name="catcher_stage1_v0_1", ent_coef=0.05, learning_rate=1e-4)
     # Catcher Stage 1 example (fresh train against the heuristic runner):
     # train(trainee_role="catcher", total_timesteps=200_000, save_to="catchy_run_catcher_stage1_v0", tb_log_name="catcher_stage1_v0")
-    #python3 -m catchy_run.rl_agent.model
+    #python3 -m rl_agent.model
