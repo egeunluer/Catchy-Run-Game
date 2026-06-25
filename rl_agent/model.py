@@ -89,7 +89,7 @@ def train(trainee_role: Agent,
 
 if __name__ == "__main__":
     #Change the signature of this train method to continue from a trained model
-    train(load_from= None,total_timesteps= 300000,trainee_role="catcher", save_to="trained_model_checkpoints/catcher_models/catchy_run_catcher_stage1_v0", tb_log_name="catcher_stage1_v0", ent_coef=0.05, learning_rate=1e-4)
+    train(load_from= "trained_model_checkpoints/catcher_models/catchy_run_catcher_stage1_v0",total_timesteps= 300000,trainee_role="catcher", save_to="trained_model_checkpoints/catcher_models/catchy_run_catcher_stage1_v1", tb_log_name="catcher_stage1_v1", ent_coef=0.05, learning_rate=2e-4)
     # Catcher Stage 1 example (fresh train against the heuristic runner):
     # train(trainee_role="catcher", total_timesteps=200_000, save_to="catchy_run_catcher_stage1_v0", tb_log_name="catcher_stage1_v0")
 

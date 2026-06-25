@@ -125,7 +125,7 @@ class RunnerRewardShaper(RewardShaper):
 
 class CatcherRewardShaper(RewardShaper):
     # --- bullet discipline (kept) ---
-    SPECIAL_DEFENSE_COEFF = 0.10     # reward for a well-aimed defensive bullet
+    SPECIAL_DEFENSE_COEFF = 0.30     # reward for a well-aimed defensive bullet
     SPECIAL_DEFENSE_NEAR_MAX = 3
     SPECIAL_DEFENSE_FAR_MIN = 4
     SPECIAL_DEFENSE_FAR_MAX = 5
