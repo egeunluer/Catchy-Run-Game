@@ -16,7 +16,7 @@ class CatchyRunEnv(gym.Env):
             moves = legal[legal < 8]
             shoots = legal[legal >= 8]
             if len(shoots) and len(moves):
-                pool = moves if self.np_random.random() < 0.80 else shoots
+                pool = moves if self.np_random.random() < 0.30 else shoots
                 return int(self.np_random.choice(pool))
         return int(self.np_random.choice(legal))
 

@@ -91,11 +91,11 @@ The **runner** shaper layers on:
 - capture bonus per special collected,
 - alive bonus,
 - catcher-distance penalty (heavy when in danger and not retreating, light otherwise),
-- projectile threat penalty,
+- projectile threat penalty (flat `-PROJECTILE_THREAT_COEFF` only when the runner moves onto one of the next two cells of a bullet that was already in flight at decision time; stacks across bullets),
 - attraction toward the two nearest *safe* uncaptured specials,
 - sprint-waste penalty,
 - urgency penalty: `-URGENCY_COEFF · (SPECIAL_MAJORITY − captured) · (turn / TURN_LIMIT)`, which gives the runner a growing nudge toward the 4-capture win threshold as the clock runs down, and disengages once that threshold is reached,
-- unsafe-capture penalty: flat `-UNSAFE_CAPTURE_PENALTY` when the runner captures a special with `cheb(runner, prev.catcher_pos) ≤ 1`, sized to neutralize the capture bonus so the existing distance penalty dominates the signal on unsafe grabs.
+- unsafe-capture penalty: on a capture turn, `-UNSAFE_CAPTURE_PENALTY` when the runner captures a special with `cheb(runner, prev.catcher_pos) ≤ 1`, **plus** a second application of the projectile-threat penalty when the captured cell sits in a bullet's next-two danger window — so grabbing a square by walking into a bullet's path is punished twice (once via the projectile threat term, once here).
 
 The **catcher** shaper is deliberately *minimal*: it gives only the bare-bones signals for the catcher's job and lets the policy work out the rest. Three components:
 

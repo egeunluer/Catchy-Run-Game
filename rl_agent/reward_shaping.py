@@ -46,14 +46,24 @@ class RunnerRewardShaper(RewardShaper):
             return -self.CATCHER_PROXIMITY_COEFF / current_dist
 
 
-    def _projectile_threat_penalty(self, curr: GameState) -> float:
+    def _projectile_threat_penalty(self, prev: GameState, curr: GameState) -> float:
+        # Flat penalty, mirroring _unsafe_capture_penalty: fire only when the
+        # runner moved onto one of a bullet's next two cells, not a
+        # distance-decaying cost for every in-flight bullet. Penalties from
+        # multiple threatening bullets stack.
+        #
+        # The threat is evaluated against prev.projectiles — the bullets in
+        # flight at the runner's decision time — not curr.projectiles. By the
+        # time shape() runs the catcher has already replied, and curr.projectiles
+        # both advanced those bullets two ticks and may include a freshly fired
+        # shot the runner could not have seen; scoring the runner's move against
+        # that would penalize it for the catcher's response, not its own choice.
         penalty = 0.0
-        for (px, py), (dx, dy) in curr.projectiles:
+        for (px, py), (dx, dy) in prev.projectiles:
             next_cell = (px + dx, py + dy)
             next2_cell = (px + 2 * dx, py + 2 * dy)
-            d1 = self._cheb(curr.runner_pos, next_cell)
-            d2 = self._cheb(curr.runner_pos, next2_cell)
-            penalty -= self.PROJECTILE_THREAT_COEFF / max(1, min(d1, d2))
+            if curr.runner_pos == next_cell or curr.runner_pos == next2_cell:
+                penalty -= self.PROJECTILE_THREAT_COEFF
         return penalty
 
     def _special_attraction(self, curr: GameState) -> float:
@@ -87,16 +97,26 @@ class RunnerRewardShaper(RewardShaper):
     def _unsafe_capture_penalty(self, prev: GameState, curr: GameState) -> float:
         #The model before adding the unsafe capture penalty: catchy_run_runner_stage0_v1_4_0
         newly_captured = len(curr.captured_squares) - len(prev.captured_squares)
-        if newly_captured > 0 and self._cheb(curr.runner_pos, prev.catcher_pos) <= 1:
-            return -self.UNSAFE_CAPTURE_PENALTY
-        return 0.0
+        if newly_captured <= 0:
+            return 0.0
+        penalty = 0.0
+        # Catcher proximity: capturing inside the catcher's one-turn kill range.
+        if self._cheb(curr.runner_pos, prev.catcher_pos) <= 1:
+            penalty -= self.UNSAFE_CAPTURE_PENALTY
+        # Bullet path: capturing while standing in a bullet's next-two danger
+        # window. This re-applies the projectile threat penalty, gated on the
+        # capture, so a runner that grabs a square by walking into a bullet's
+        # path is punished twice — once from _projectile_threat_penalty in
+        # _compute, and once here.
+        penalty += self._projectile_threat_penalty(prev, curr)
+        return penalty
 
     def _compute(self, prev_state: GameState, curr_state: GameState, base_reward: float) -> float:
         return (base_reward
                 + self._capture_bonus(prev_state, curr_state)
                 + self.ALIVE_BONUS
                 + self._catcher_distance_rewarding(curr_state, prev_state)
-                + self._projectile_threat_penalty(curr_state)
+                + self._projectile_threat_penalty(prev_state, curr_state)
                 + self._special_attraction(curr_state)
                 + self._sprint_waste_penalty(prev_state, curr_state)
                 + self._urgency_penalty(curr_state)

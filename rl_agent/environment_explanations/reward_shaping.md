@@ -32,7 +32,7 @@ edit them:
 | `ALIVE_BONUS`               | 0.005 | Flat per-step bonus while the game is ongoing.                                                                      |
 | `CATCHER_DISTANCE_COEFF`    | 0.30  | Heavy-branch numerator: in danger and runner didn't move away from the catcher.                                     |
 | `CATCHER_PROXIMITY_COEFF`   | 0.02  | Light-branch numerator: in danger but moved away, or in the safe zone.                                              |
-| `PROJECTILE_THREAT_COEFF`   | 0.25  | Numerator of the per-projectile threat penalty.                                                                     |
+| `PROJECTILE_THREAT_COEFF`   | 0.25  | Flat per-bullet penalty when the runner stands on one of that bullet's next two cells (equal to `UNSAFE_CAPTURE_PENALTY`).            |
 | `ATTRACTION_NEAREST`        | 0.01  | Numerator of the closest-safe-special attraction term.                                                              |
 | `ATTRACTION_SECOND_NEAREST` | 0.005 | Numerator of the second-closest-safe-special attraction term.                                                       |
 | `SPRINT_WASTE_PENALTY`      | 0.02  | Flat penalty when the runner sprints while already in the safe zone.                                                |
@@ -56,12 +56,13 @@ shaped = base
        + CAPTURE_BONUS  · newly_captured                              # capture bonus
        + ALIVE_BONUS                                                  # alive bonus
        + catcher_term                                                 # see below
-       − Σ over bullets:  PROJECTILE_THREAT_COEFF / max(1, min(d₁, d₂))   # bullet gradient
+       − Σ over prev bullets:  PROJECTILE_THREAT_COEFF  if curr.runner_pos on bullet's next or 2nd-next cell   # bullet threat
        + ATTRACTION_NEAREST       / max(1, cheb(runner, safe₁))       # attraction (closest)
        + ATTRACTION_SECOND_NEAREST/ max(1, cheb(runner, safe₂))       # attraction (2nd closest)
        − SPRINT_WASTE_PENALTY     if sprint_used and in_safe_zone     # sprint waste
        − URGENCY_COEFF · shortfall · (curr.turn / TURN_LIMIT)         # urgency (shortfall = max(0, SPECIAL_MAJORITY − |captured|))
-       − UNSAFE_CAPTURE_PENALTY   if newly_captured > 0 and cheb(curr.runner_pos, prev.catcher_pos) ≤ 1   # unsafe capture
+       − UNSAFE_CAPTURE_PENALTY   if newly_captured > 0 and cheb(curr.runner_pos, prev.catcher_pos) ≤ 1   # unsafe capture (catcher)
+       + projectile_threat(prev, curr)   if newly_captured > 0                                            # unsafe capture (bullet) — re-applies the bullet term
 
 where catcher_term =
        −CATCHER_DISTANCE_COEFF  / cheb(runner, catcher)   if cheb(runner, catcher) ≤ DANGER_RADIUS
@@ -71,11 +72,13 @@ where catcher_term =
 ```
 
 `safe₁`, `safe₂` are the two closest *uncaptured* specials that lie more than
-`DANGER_RADIUS` away from the catcher. `d₁`, `d₂` are the Chebyshev distances
-from the runner to a projectile's next cell and the cell after that. The
-projectile and attraction terms clamp their divisor via `max(1, …)`, so the
-penalty / reward saturates at the coefficient value rather than blowing up at
-distance 0. The catcher term needs no clamp — in any non-terminal state
+`DANGER_RADIUS` away from the catcher. The projectile term is now a flat
+threshold penalty: it fires `−PROJECTILE_THREAT_COEFF` per bullet **in
+`prev.projectiles`** (the bullets in flight when the runner decided) whose next
+or second-next cell coincides with `curr.runner_pos`, and contributes nothing
+otherwise. The attraction term clamps its divisor via `max(1, …)`, so the
+reward saturates at the coefficient value rather than blowing up at distance 0.
+The catcher term needs no clamp — in any non-terminal state
 `cheb(runner, catcher) ≥ 1` (a `0` means the catcher caught the runner, which
 terminates the episode and short-circuits `shape`).
 
@@ -105,13 +108,18 @@ longer has to do the work alone on noisy transitions.
 
 ```
 newly_captured = |curr.captured_squares| − |prev.captured_squares|
-penalty        = −UNSAFE_CAPTURE_PENALTY   if newly_captured > 0
-                                            and cheb(curr.runner_pos, prev.catcher_pos) ≤ 1
-                 0                           otherwise
+if newly_captured ≤ 0:
+    penalty = 0
+else:
+    penalty  = −UNSAFE_CAPTURE_PENALTY   if cheb(curr.runner_pos, prev.catcher_pos) ≤ 1   # catcher part
+    penalty += projectile_threat_penalty(prev, curr)                                       # bullet part
 ```
 
-Fires when the runner captures a special that sits adjacent to where the
-catcher was *at the start of the half-turn*. The distance is measured
+This penalty has **two parts**, both gated on a capture having happened this
+turn (`newly_captured > 0`).
+
+**Catcher part.** Fires when the runner captures a special that sits adjacent
+to where the catcher was *at the start of the half-turn*. The distance is measured
 against `prev.catcher_pos`, not `curr.catcher_pos`, because the danger that
 matters is the danger at decision time: by the time `shape()` runs the
 catcher has already replied, and `curr.catcher_pos` is confounded with the
@@ -135,6 +143,20 @@ gone — the heavy distance branch then makes the signal cleanly negative,
 and the terminal reward does the rest. We deliberately keep this penalty
 below the `+1` terminal so a *game-winning* unsafe capture (the runner's 4th
 special) is still favored when the terminal reward will pay out.
+
+**Bullet part.** This re-applies `_projectile_threat_penalty(prev, curr)` — the
+exact same flat, per-bullet term documented above — but only on a capture turn.
+The projectile term *already* fires once inside `_compute` for any step where
+the runner stands in a bullet's next-two window; adding it a second time here
+means a runner that grabs a special *by walking into* that window eats the
+bullet penalty **twice** (`−0.50` for one threatening bullet, stacking per
+bullet). The intent mirrors the catcher part: capturing is only worth the
+risk when it's safe, so the same danger that costs the runner on an ordinary
+step costs it double when it's the price of a grab. We deliberately reuse the
+method rather than duplicate the cell math, so the "double" stays a true
+doubling of whatever `PROJECTILE_THREAT_COEFF` is set to. Like the standalone
+projectile term, the immediate-collision (`next_cell`) case is essentially
+always terminal, so in practice this part fires on the `next2_cell` case.
 
 ### Alive bonus — flat `+ALIVE_BONUS`
 
@@ -183,23 +205,48 @@ fades as the runner gets clear (e.g. `≈ −0.0033` at cheb 6).
 
 ### Projectile threat penalty — `_projectile_threat_penalty(curr)`
 
-For each in-flight projectile `((px, py), (dx, dy))` in `curr.projectiles`:
+For each in-flight projectile `((px, py), (dx, dy))` in **`prev.projectiles`**:
 
 ```
 next_cell  = (px +   dx, py +   dy)
 next2_cell = (px + 2·dx, py + 2·dy)
-d₁ = cheb(runner_pos, next_cell)
-d₂ = cheb(runner_pos, next2_cell)
-penalty -= PROJECTILE_THREAT_COEFF / max(1, min(d₁, d₂))
+penalty   -= PROJECTILE_THREAT_COEFF   if curr.runner_pos ∈ {next_cell, next2_cell}
+             0                          otherwise
 ```
 
-The penalty samples the two cells the bullet will land on over the next two
-ticks. Using `min(d₁, d₂)` means proximity to *either* upcoming cell triggers
-a sharp penalty — the gradient stays steep so the runner reliably learns to
-side-step the bullet's path, not just step out of the single next cell.
-Penalties from multiple in-flight projectiles sum: a runner sandwiched by
-two bullets really is in twice as much danger. At distance 1 to either
-sampled cell the penalty saturates at `−0.25` per bullet.
+This is a **flat threshold** penalty, deliberately the same shape as the
+unsafe-capture penalty: rather than a distance-decaying cost levied on every
+bullet in flight, it fires only when the runner moved onto one of the two cells
+a bullet will occupy over the next two ticks — i.e. into the bullet's two-step
+kill window. A bullet that is on the board but not on the runner's cell costs
+nothing, so the runner is no longer taxed merely for the catcher having shot
+somewhere on the board.
+
+**Why `prev.projectiles`, not `curr.projectiles`.** This term is the runner's
+analogue of the unsafe-capture penalty: it scores the runner's *own decision*,
+so it must read the world as it stood at decision time. By the time `shape()`
+runs the catcher has already replied, and `curr.projectiles` is doubly
+confounded — the pre-existing bullets have advanced two ticks, and a bullet the
+catcher *just fired* may now sit on the board. Penalizing the runner for that
+fresh shot would punish it for the catcher's response rather than its own move,
+since the bullet did not exist when the runner chose where to go. Reading
+`prev.projectiles` and checking the runner's chosen destination
+(`curr.runner_pos`, which the catcher's reply cannot change) restores the clean
+"did the runner step into a bullet that was already in flight?" semantics.
+
+Note the next-cell case is largely terminal: if the runner steps onto a bullet's
+immediate next cell, the engine's per-tick `bullet_hit_runner` check catches it
+and `shape()` short-circuits on the terminal branch. So in practice this term
+mainly fires on `next2_cell` — the runner survived this tick but parked where a
+pre-existing bullet is headed. Keeping both cells preserves the "two dangerous
+squares" framing and is harmless.
+
+Penalties from multiple in-flight projectiles still sum: a runner whose cell
+sits in the next-two window of two different bullets really is in twice as
+much danger, so it eats `−0.25` per threatening bullet. The coefficient
+(`PROJECTILE_THREAT_COEFF = 0.25`) equals `UNSAFE_CAPTURE_PENALTY` by
+design — both are flat "you stepped into a kill square" penalties and share a
+magnitude.
 
 ### Special-square attraction — `_special_attraction(curr)`
 
@@ -289,14 +336,24 @@ unambiguously safe" — sprinting from there isn't flagged as wasted.
 A few worst-case sums to keep the relative scales straight:
 
 - **Per-step floor.** Catcher adjacent and runner didn't retreat (heavy
-  branch, `−0.30`), one bullet's sampled cell adjacent to the runner
+  branch, `−0.30`), the runner standing on one bullet's next-two cell
   (`−0.25`), shortfall = 4 at turn 38 (urgency `≈ −0.019`), no captures,
   no safe specials, no waste, alive bonus (`+0.005`): shaping ≈ `−0.56`.
   Still above the `−1` terminal as a single-step signal. The unsafe-capture
-  penalty (`−0.25`) can only fire when `newly_captured > 0`, so it never
-  stacks with the "no captures" floor — its worst-case stack is with the
-  capture bonus, where it lands a net `≈ −0.305` on a cheb-1 unsafe grab
-  (capture `+0.24`, heavy catcher `−0.30`, alive `+0.005`, unsafe `−0.25`).
+  penalty can only fire when `newly_captured > 0`, so it never stacks with the
+  "no captures" floor — its worst-case stack is with the capture bonus. On a
+  cheb-1 unsafe grab with no bullet it lands a net `≈ −0.305` (capture `+0.24`,
+  heavy catcher `−0.30`, alive `+0.005`, unsafe-catcher `−0.25`). If that same
+  grab also steps into a bullet's next-two window, the bullet term fires twice
+  (once in `_compute`, once in the unsafe-capture bullet part) for an extra
+  `−0.50` per threatening bullet, taking the one-bullet worst case to `≈ −0.805`.
+  With *two* bullets converging on the captured cell the doubled-and-stacked
+  bullet penalty alone reaches `−1.0`, so the single-step shaping can dip below
+  the `−1` terminal. We accept this: a capture that walks into a two-bullet
+  crossfire next to the catcher is a near-certain death the policy *should* be
+  strongly steered away from, and it is a transient per-step signal — episode
+  return is still anchored by the terminal `±1`, so aggregate terminal dominance
+  (never rewarding a losing line over a winning one across the episode) holds.
 - **Per-step ceiling.** Captured a special (`+0.24`) on a transition where
   the runner is on top of one safe special (`+0.01`) with another at
   distance 1 (`+0.005`), catcher far in the safe zone (light branch

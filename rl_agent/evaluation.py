@@ -2,11 +2,10 @@ import numpy as np
 from sb3_contrib import MaskablePPO
 
 from rl_agent.environment import CatchyRunEnv
-from rl_agent.opponents import heuristic_opponent
+from rl_agent.opponents import heuristic_opponent, defensive_shooter_opponent
 from catchy_run_game.engine import Agent, TURN_LIMIT
-from catchy_run_game.agents.rl_runner import rl_runner_policy
 
-def evaluate(trainee_role: Agent, model_path: str, n_episodes: int = 400, base_seed: int = 0, opponent_policy = heuristic_opponent):
+def evaluate(trainee_role: Agent, model_path: str, n_episodes: int = 400, base_seed: int = 0, opponent_policy = defensive_shooter_opponent):
     if trainee_role == "runner":
         env = CatchyRunEnv(trainee_role=trainee_role, opponent_policy=opponent_policy)
     else:
@@ -60,7 +59,7 @@ def evaluate(trainee_role: Agent, model_path: str, n_episodes: int = 400, base_s
         print(f"Mean Lengths: {mean_lengths:.2f}")
 
 if __name__ == "__main__":
-      evaluate(trainee_role= "catcher",model_path="trained_model_checkpoints/catcher_models/catchy_run_catcher_stage1_v0_1", n_episodes=400, )
+      evaluate(trainee_role= "runner",model_path="trained_model_checkpoints/runner_models/catchy_run_runner_stage1_v0.zip", n_episodes=400, )
       # Catcher evaluation example:
       # evaluate(trainee_role="catcher", model_path="catchy_run_catcher_stage1_v0", n_episodes=400)
       #python3 -m rl_agent.evaluation
