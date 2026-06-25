@@ -59,7 +59,7 @@ def evaluate(trainee_role: Agent, model_path: str, n_episodes: int = 400, base_s
         print(f"Mean Lengths: {mean_lengths:.2f}")
 
 if __name__ == "__main__":
-      evaluate(trainee_role= "runner",model_path="trained_model_checkpoints/runner_models/catchy_run_runner_stage1_v0.zip", n_episodes=400, )
+      evaluate(trainee_role= "runner",model_path="trained_model_checkpoints/runner_models/catchy_run_runner_stage1_v2.zip", n_episodes=400, )
       # Catcher evaluation example:
       # evaluate(trainee_role="catcher", model_path="catchy_run_catcher_stage1_v0", n_episodes=400)
       #python3 -m rl_agent.evaluation
