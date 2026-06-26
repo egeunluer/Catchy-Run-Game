@@ -18,7 +18,7 @@ from catchy_run_game.engine import Agent
 RUNNER_COMPONENTS = ["base", "alive", "capture", "catcher", "projectile",
                      "attraction", "sprint_waste", "urgency", "unsafe_capture"]
 
-CATCHER_COMPONENTS = ["base", "special_defense", "captured_square"]
+CATCHER_COMPONENTS = ["base", "special_defense", "square", "distance"]
 
 
 def _runner_step_dict(shaper, prev, curr, base):
@@ -43,7 +43,8 @@ def _catcher_step_dict(shaper, prev, curr, base):
         "captured": len(curr.captured_squares),
         "base": base,
         "special_defense": shaper._special_defense_bonus(prev, curr),
-        "captured_square": shaper._captured_square_penalty(prev, curr),
+        "square": shaper._square_potential(curr) - shaper._square_potential(prev),
+        "distance": shaper._distance_potential(curr) - shaper._distance_potential(prev),
     }
 
 
@@ -152,7 +153,8 @@ def trace_single_episode(seed: int = 0, trainee_role: Agent = "runner"):
                 f"turn={curr.turn:2d}",
                 f"cap={len(curr.captured_squares)}",
                 f"special_defense={shaper._special_defense_bonus(prev, curr):+.3f}",
-                f"captured_square={shaper._captured_square_penalty(prev, curr):+.3f}",
+                f"square={shaper._square_potential(curr) - shaper._square_potential(prev):+.3f}",
+                f"distance={shaper._distance_potential(curr) - shaper._distance_potential(prev):+.3f}",
                 f"=> {result:+.3f}",
             ]
         print("  ".join(parts))

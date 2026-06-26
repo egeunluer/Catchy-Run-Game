@@ -124,16 +124,26 @@ class RunnerRewardShaper(RewardShaper):
 
 
 class CatcherRewardShaper(RewardShaper):
-    # --- bullet discipline (kept) ---
-    SPECIAL_DEFENSE_COEFF = 0.30     # reward for a well-aimed defensive bullet
+    # --- bullet discipline ---
+    SPECIAL_DEFENSE_COEFF = 0.10     # reward for a well-aimed defensive bullet
     SPECIAL_DEFENSE_NEAR_MAX = 3
     SPECIAL_DEFENSE_FAR_MIN = 4
     SPECIAL_DEFENSE_FAR_MAX = 5
-    BULLET_SPAM_PENALTY = 0.30       # hard penalty for any other bullet
+    BULLET_SPAM_PENALTY = 0.15       # hard penalty for any other bullet (>= defense bonus, so net shooting is non-farmable)
 
-    # --- primitive task signals ---
+    # --- terminal task signal ---
     CATCH_BONUS = 2.0                # standout reward for catching the runner (on top of base +1)
-    CAPTURED_SQUARE_PENALTY = 0.50   # hard penalty per special the runner captures
+
+    # --- potential-based dense shaping ---
+    # Phi(s) = SQUARE_POTENTIAL_COEFF * (uncaptured specials)
+    #        - DISTANCE_COEFF     * manhattan(runner, catcher)
+    # The per-step reward is F = Phi(curr) - Phi(prev) (gamma = 1). Because it
+    # telescopes over an episode, neither dense term can accumulate past the
+    # terminal +/-1, so the win/lose verdict always dominates the gradient.
+    #   - square part: an event-style -SQUARE_POTENTIAL_COEFF per captured square.
+    #   - distance part: +DISTANCE_COEFF per unit the catcher closes the gap.
+    SQUARE_POTENTIAL_COEFF = 0.03    # per-capture hit ~= -0.03 when the runner grabs a square
+    DISTANCE_COEFF = 0.01            # per-step reward ~= +0.01 for each unit the catcher closes
 
     @staticmethod
     def _runner_reaches_in_one(state: GameState, target: tuple[int, int]) -> bool:
@@ -238,9 +248,19 @@ class CatcherRewardShaper(RewardShaper):
 
         return -self.BULLET_SPAM_PENALTY
 
-    def _captured_square_penalty(self, prev: GameState, curr: GameState) -> float:
-        newly_captured = len(curr.captured_squares) - len(prev.captured_squares)
-        return -self.CAPTURED_SQUARE_PENALTY * newly_captured
+    @staticmethod
+    def _manhattan(a: tuple[int, int], b: tuple[int, int]) -> int:
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    def _square_potential(self, state: GameState) -> float:
+        uncaptured = len(state.special_squares) - len(state.captured_squares)
+        return self.SQUARE_POTENTIAL_COEFF * uncaptured
+
+    def _distance_potential(self, state: GameState) -> float:
+        return -self.DISTANCE_COEFF * self._manhattan(state.runner_pos, state.catcher_pos)
+
+    def _potential(self, state: GameState) -> float:
+        return self._square_potential(state) + self._distance_potential(state)
 
     def _is_catch(self, curr: GameState) -> bool:
         if curr.winner != "catcher":
@@ -256,6 +276,11 @@ class CatcherRewardShaper(RewardShaper):
         return self._compute(prev_state, curr_state, base_reward)
 
     def _compute(self, prev_state: GameState, curr_state: GameState, base_reward: float) -> float:
+        # Dense shaping is potential-based (gamma = 1): F = Phi(curr) - Phi(prev).
+        # This resolves to -SQUARE_POTENTIAL_COEFF per square the runner just
+        # captured plus +DISTANCE_COEFF per unit the catcher closed the Manhattan
+        # gap, and telescopes so it can never overwhelm the terminal verdict.
+        potential_delta = self._potential(curr_state) - self._potential(prev_state)
         return (base_reward
-                + self._special_defense_bonus(prev_state, curr_state)
-                + self._captured_square_penalty(prev_state, curr_state))
+                + potential_delta
+                + self._special_defense_bonus(prev_state, curr_state))

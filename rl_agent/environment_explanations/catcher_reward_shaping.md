@@ -7,23 +7,32 @@ otherwise, `0` on every non-terminal step. Unlike the runner, the catcher's
 terminal events can happen mid-episode (a kill terminates immediately on
 contact), so the credit-assignment problem is shorter.
 
-This shaper is deliberately **minimal**. An earlier version layered four
+This shaper is deliberately **lean**. An earlier version layered four
 dense components (special-blocking attraction, chase/cornering, time
-advantage, defensive bullets) on top of the sparse signal. The catcher
-learned to farm those per-step terms instead of doing its job — classic
-reward hacking. The current design strips the shaping back to the bare
-minimum task signals and lets the policy discover the rest:
+advantage, defensive bullets) on top of the sparse signal as raw per-step
+bonuses. The catcher learned to farm those terms instead of doing its job —
+classic reward hacking, because a standing per-turn reward accumulates with
+episode length and can out-earn the terminal verdict. The current design keeps
+only the genuine task signals and routes every dense term through a
+**potential function**, so it telescopes and cannot accumulate:
 
-1. **catch the runner** — by far the biggest reward,
-2. **defend the special squares** — hard penalty whenever the runner grabs one,
-3. **shoot well** — keep the well-aimed-bullet reward, penalize every other
-   shot hard.
+1. **catch the runner** — by far the biggest reward (terminal),
+2. **defend the special squares** — a potential term that costs the catcher
+   exactly when the runner grabs one,
+3. **close the distance** — a potential term that pays the catcher for shrinking
+   the Manhattan gap to the runner (cornering pressure),
+4. **shoot well** — keep the well-aimed-bullet reward, penalize every other
+   shot at least as hard.
 
-Nothing else. No positioning, chasing, or cornering signals. The hypothesis
-is that with a strong, clean reward for the actual objective and strong, clean
-penalties for the actual failures, the catcher will learn the intermediate
-behaviors (interposing, chasing, cornering) on its own rather than being
-hand-held into them — and without a dense surface to hack.
+The shift from raw per-step bonuses to **potential-based shaping**
+(Ng, Harada & Russell 1999) is the core of the rework. A potential term
+`F = γ·Φ(s′) − Φ(s)` telescopes over an episode to `γ^T·Φ_T − Φ_0`, a constant
+independent of trajectory length, so it provably cannot change the optimal
+policy and — crucially here — **cannot out-earn the terminal `±1` no matter how
+long the episode runs**. That is what makes "the terminal reward always
+dominates" a structural guarantee rather than a coefficient-tuning hope. We use
+`γ = 1` in the potential (no need to plumb the RL discount into the shaper),
+which makes the per-step semantics exact: `Φ(curr) − Φ(prev)`.
 
 `CatcherRewardShaper` lives alongside `RunnerRewardShaper` in
 `rl_agent/reward_shaping.py`. Both subclass a shared `RewardShaper` base
@@ -41,12 +50,17 @@ shaper at construction time based on `trainee_role`.
 | `SPECIAL_DEFENSE_NEAR_MAX` | 3     | Inclusive max Chebyshev distance along the shoot ray for the "runner reaches in 1" check.   |
 | `SPECIAL_DEFENSE_FAR_MIN`  | 4     | Inclusive min Chebyshev distance along the shoot ray for the "runner reaches in 2" check.   |
 | `SPECIAL_DEFENSE_FAR_MAX`  | 5     | Inclusive max Chebyshev distance along the shoot ray for the "runner reaches in 2" check.   |
-| `BULLET_SPAM_PENALTY`      | 0.30  | Hard flat penalty on the shoot turn when the new bullet's ray fails both reach checks.       |
+| `BULLET_SPAM_PENALTY`      | 0.15  | Hard flat penalty on the shoot turn when the new bullet's ray fails both reach checks.       |
 | `CATCH_BONUS`              | 2.0   | Standout reward (on top of the terminal `+1`) when the catcher actually catches the runner.  |
-| `CAPTURED_SQUARE_PENALTY`  | 0.50  | Hard penalty per special the runner captures during the catcher's env-step.                  |
+| `SQUARE_POTENTIAL_COEFF`   | 0.03  | Potential weight per uncaptured special; per-capture hit is `-0.03`.                          |
+| `DISTANCE_COEFF`           | 0.01  | Potential weight on the Manhattan gap; pays `+0.01` per unit the catcher closes.             |
 
-Distances are **Chebyshev** throughout, matching the engine's 8-directional
-movement (one step in any direction equals one unit of Chebyshev distance).
+The shoot-ray reach checks use **Chebyshev** distance, matching the engine's
+8-directional movement. The distance *potential* uses **Manhattan** distance on
+purpose: it penalizes being off on both axes, which pushes the catcher to align
+with and corner the runner rather than merely sharing a row or column. (Note the
+catcher moves in Chebyshev, so a diagonal step closes two Manhattan units and
+earns `+0.02` that turn.)
 
 ## The reward function in two parts
 
@@ -60,8 +74,11 @@ shape(prev, curr, base):
 
 _compute(prev, curr, base):
     return base
-         + _special_defense_bonus(prev, curr)   # one-shot per fired bullet
-         + _captured_square_penalty(prev, curr)  # per special the runner grabs
+         + (Phi(curr) - Phi(prev))              # potential-based dense shaping
+         + _special_defense_bonus(prev, curr)    # one-shot per fired bullet
+
+Phi(s) = SQUARE_POTENTIAL_COEFF * (uncaptured specials)
+       - DISTANCE_COEFF         * manhattan(runner, catcher)
 ```
 
 The terminal branch is where the catch bonus has to live, because a catch
@@ -96,11 +113,11 @@ would re-introduce the "stalling counts as winning" behavior that the old
 remove. A timeout win still collects the engine's terminal `+1`; it just
 doesn't get the `+2` on top.
 
-**Magnitude.** A catch totals `base (+1) + CATCH_BONUS (+2) = +3`. That is
-larger than any plausible per-episode accumulation of the two per-step
-signals, so the policy gradient points unambiguously at "end the episode by
-catching the runner." This is intentional: the catch is the objective, and
-its reward should dominate everything else by design.
+**Magnitude.** A catch totals `base (+1) + CATCH_BONUS (+2) = +3`. The dense
+potential shaping is bounded to `≈ ±0.33` per episode (it telescopes) and the
+bullet signal is small and gated, so the policy gradient points unambiguously at
+"end the episode by catching the runner." This is intentional: the catch is the
+objective, and its reward should dominate everything else by design.
 
 ### Special-defense bonus / bullet-spam penalty — `_special_defense_bonus(prev, curr)`
 
@@ -144,14 +161,16 @@ short-circuits to `0`. The bullet spawns at `prev.catcher_pos` and is advanced
 one cell the same turn, so its `curr` position is `(catcher + dir)` with
 direction equal to the chosen shoot direction.
 
-**Why the spam penalty is now harder than the bonus.** With the bonus at
-`0.10` and the penalty at `0.30`, a catcher that fires at random nets `-0.20`
-in expectation per shot — firing is *strictly* discouraged unless the shot
-clears one of the two reach checks. The asymmetry (vs. the old symmetric
-`0.10/0.10`) is deliberate: the rework wants a catcher that shoots rarely and
-only with a concrete defensive purpose, so undisciplined shooting is punished
-harder than disciplined shooting is rewarded. If you observe the catcher
-refusing to shoot even in clear defensive situations, lower the penalty.
+**Why the spam penalty is `≥` the bonus.** With the bonus at `0.10` and the
+penalty at `0.15`, a catcher that fires at random nets a loss in expectation per
+shot — firing is discouraged unless the shot clears one of the two reach checks.
+Keeping the penalty at least as large as the bonus also closes the one dense
+*positive* surface that is **not** potential-based: a runner camping next to a
+threatened special could otherwise let the catcher re-earn `+0.10` every turn.
+With `BULLET_SPAM_PENALTY ≥ SPECIAL_DEFENSE_COEFF`, net repeated shooting can't
+be farmed, so the terminal-dominates guarantee holds even against a camping
+runner. If you observe the catcher refusing to shoot even in clear defensive
+situations, lower the penalty (but not below the bonus).
 
 **The reach predicates** (`_runner_reaches_in_one`,
 `_runner_reaches_in_exactly_two`) are structural rather than radius-based,
@@ -162,42 +181,61 @@ remaining sprint charges and catcher-blocking." They read `prev` because the
 runner's position and sprint count are unchanged across the catcher's
 half-turn, and `prev` is the state at firing time.
 
-### Captured-square penalty — `_captured_square_penalty(prev, curr)`
+### Potential-based dense shaping — `Phi(curr) − Phi(prev)`
 
-The mirror of the runner's `_capture_bonus`, negated and made hard:
+Both dense signals live in one potential, applied as its per-step difference
+(`γ = 1`):
 
 ```
-newly_captured = len(curr.captured_squares) − len(prev.captured_squares)
-return -CAPTURED_SQUARE_PENALTY · newly_captured
+Phi(s) = SQUARE_POTENTIAL_COEFF · (uncaptured specials)
+       − DISTANCE_COEFF         · manhattan(runner, catcher)
 ```
 
 For a catcher trainee, `prev` is the state before the catcher's action and
-`curr` is the state after the catcher's action **and** the runner's response.
-The runner moves once inside that window, so any special the runner steps onto
-shows up as `newly_captured` here. At `0.50` per square and a `SPECIAL_MAJORITY`
-of 4, the cumulative pressure of letting the runner win on captures is about
-`-2.0` — comparable in scale to the catch bonus, so "stop the captures" reads
-as a real objective, not a rounding error.
+`curr` is the state after the catcher's action **and** the runner's response, so
+the difference captures the net effect of the full env-step. It decomposes into
+two readable parts:
+
+- **Square defense.** `SQUARE_POTENTIAL_COEFF · (uncaptured)` falls by exactly
+  `0.03` for each special the runner grabs this step, so `Φ(curr) − Φ(prev)`
+  contributes `−0.03 · newly_captured`. This is the `γ = 1` potential-based form
+  of the old captured-square penalty — same gradient at the capture event, but
+  with the coefficient *decoupled* from any standing per-turn income. A naive
+  "+reward per uncaptured square each turn" would pay the catcher to stall (more
+  surviving turns = more income), re-growing the passivity this shaper exists to
+  kill; the potential form gives the catcher `≈ 0` on turns where nothing is
+  captured and only the `−0.03` hit on the turn one is lost.
+- **Cornering.** `−DISTANCE_COEFF · manhattan(runner, catcher)` rises as the gap
+  shrinks, so closing one Manhattan unit pays `+0.01` and a diagonal step (which
+  closes two) pays `+0.02`. Letting the runner slip away costs the same per unit.
+
+**Why this can't be farmed.** A potential difference telescopes:
+`Σ_t (Φ_{t+1} − Φ_t) = Φ_T − Φ_0`. Over any episode the total dense shaping is
+just `Φ(last) − Φ(first)`, bounded by `max|Φ|` regardless of how many turns the
+game lasts — at most `0.03·7 + 0.01·12 ≈ 0.33` in magnitude. It therefore cannot
+accumulate past the terminal `±1`, which is precisely the property that makes the
+win/lose verdict dominate the gradient on *every* episode, not just short ones.
 
 **Edge case: the 7th capture.** Capturing the 7th special ends the game in the
-runner's favor (`terminated=True`), which routes through the terminal branch
-of `shape()` — so `_captured_square_penalty` does **not** fire on that final
-grab. That's fine: the engine's terminal `-1` already punishes the loss, and
-double-counting the last square would not change the gradient direction.
+runner's favor (`terminated=True`), which routes through the terminal branch of
+`shape()` — so the potential difference does **not** fire on that final grab.
+That's fine: the engine's terminal `-1` already punishes the loss.
 
 ## Calibration summary
 
-| Signal                     | Min     | Max     | When it fires                          |
-|----------------------------|---------|---------|----------------------------------------|
-| catch bonus (terminal)     | `0`     | `+2.0`  | catcher actually catches the runner    |
-| `_special_defense_bonus`   | `-0.30` | `+0.10` | a bullet is fired this turn            |
-| `_captured_square_penalty` | `-0.50` | `0`     | runner captures ≥1 special this step   |
+| Signal                   | Min      | Max      | When it fires                                |
+|--------------------------|----------|----------|----------------------------------------------|
+| catch bonus (terminal)   | `0`      | `+2.0`   | catcher actually catches the runner          |
+| `_special_defense_bonus` | `-0.15`  | `+0.10`  | a bullet is fired this turn                  |
+| square potential delta   | `-0.06`  | `0`      | runner captures ≥1 special this step         |
+| distance potential delta | `-0.06`  | `+0.06`  | the Manhattan gap changes (almost every step) |
 
-Per-step magnitude is dominated by the captured-square penalty (`-0.50`); the
-catch bonus (`+2.0`, terminal-only) dominates the episode. Every sign matches
-the win/lose verdict, which is what governs PPO convergence. There is no dense
-positive per-step surface left to farm — the only repeatable positive signal
-is the well-aimed bullet, which is gated behind two structural reach checks.
+Per-episode, the catch (`+3` total) dominates by design, and the dense potential
+shaping is bounded to `≈ ±0.33` total no matter the episode length — so a
+timeout win (`+1`) or a loss (`-1`) always keeps its sign. The only repeatable
+positive *event* signal is the well-aimed bullet, gated behind two structural
+reach checks and capped below the spam penalty, so there is no dense surface left
+to farm.
 
 ## Integration with the environment
 
@@ -212,7 +250,8 @@ else:
 
 `CatchyRunEnv._shape_reward` is a one-line delegation to whichever shaper was
 bound. Run `rl_agent/trace_rewards.py` with `trainee_role="catcher"` to
-confirm component signs and magnitudes; the trace tool reports the two per-step
-components (`special_defense`, `captured_square`) alongside `base`. The catch
+confirm component signs and magnitudes; the trace tool reports the three per-step
+components (`special_defense`, `square`, `distance`) alongside `base`, where
+`square` and `distance` are the two halves of the potential difference. The catch
 bonus only appears on terminal kills, so it shows up in the per-episode reward
 total rather than the per-step component table.
