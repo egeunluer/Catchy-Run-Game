@@ -4,33 +4,19 @@ from sb3_contrib.common.maskable.buffers import MaskableRolloutBuffer
 from stable_baselines3.common.callbacks import CheckpointCallback
 
 from rl_agent.environment import CatchyRunEnv
-from rl_agent.opponents import heuristic_opponent, make_rl_opponent, defensive_shooter_opponent
+from rl_agent.opponents import heuristic_opponent, defensive_shooter_opponent
 from rl_agent.custom_cnn import policy_kwargs
 from catchy_run_game.engine import Agent
 
-# Bullet-spamming catcher used to teach the runner to respect/dodge bullets.
-SPAM_CATCHER_CKPT = "trained_model_checkpoints/catcher_models/catchy_run_catcher_stage1_v0_1.zip"
-
 def mask_fn(env: CatchyRunEnv):
-    """ActionMasker will call this on every step to extract the current action mask."""
     return env.unwrapped._info()["action_mask"]
 
-def make_env(trainee_role: Agent):
-    if trainee_role == "runner":
-        env = CatchyRunEnv(trainee_role=trainee_role)
-        # Stochastic so the runner sees varied bullet patterns, not one fixed line.
-        spam_catcher = make_rl_opponent(SPAM_CATCHER_CKPT, role="catcher", deterministic=False)
-        env.set_opponent_pool(
-            # random shooter (bullets from anywhere) | heuristic chaser (keeps evasion
-            # sharp) | defensive shooter (chaser that fires exactly when a special is
-            # threatened — teaches purposeful dodging) | the spammer (the actual bullet
-            # problem to solve). Tune weights.
-            [defensive_shooter_opponent, spam_catcher],
-            weights=[0.8, 0.2],
-        )
-    else:
-        from catchy_run_game.agents.rl_runner import rl_runner_policy
-        env = CatchyRunEnv(trainee_role=trainee_role, opponent_policy=lambda state: rl_runner_policy(state))
+def make_env(trainee_role: Agent = "runner"):
+    env = CatchyRunEnv(trainee_role=trainee_role)
+    env.set_opponent_pool(
+        [heuristic_opponent, defensive_shooter_opponent],
+        weights=[0.0, 1.0],
+    )
     env = ActionMasker(env, mask_fn)
     return env
 
@@ -88,15 +74,14 @@ def train(trainee_role: Agent,
 
 
 if __name__ == "__main__":
-    #Change the signature of this train method to continue from a trained model
-    train(load_from= "trained_model_checkpoints/catcher_models/catchy_run_catcher_stage1_v1",total_timesteps= 500000,trainee_role="catcher", save_to="trained_model_checkpoints/catcher_models/catchy_run_catcher_stage1_v2", tb_log_name="catcher_stage1_v2", ent_coef=0.05, learning_rate=2e-4)
-    # Catcher Stage 1 example (fresh train against the heuristic runner):
-    # train(trainee_role="catcher", total_timesteps=200_000, save_to="catchy_run_catcher_stage1_v0", tb_log_name="catcher_stage1_v0")
+    # Continue runner training from latest checkpoint:
+    # train(load_from="trained_model_checkpoints/runner_models/catchy_run_runner_stage1_v2",
+    #       total_timesteps=400_000, trainee_role="runner",
+    #       save_to="trained_model_checkpoints/runner_models/catchy_run_runner_stage1_v3",
+    #       tb_log_name="runner_stage1_v3", ent_coef=0.02, learning_rate=5e-5)
 
-    # Teach the runner to dodge: continue the current runner against the pool that now
-    # includes the bullet-spamming catcher (SPAM_CATCHER_CKPT). Swap load_from to your runner ckpt.
-    """train(load_from="trained_model_checkpoints/runner_models/catchy_run_runner_stage1_v1",
-           total_timesteps=400_000, trainee_role="runner",
-           save_to="trained_model_checkpoints/runner_models/catchy_run_runner_stage1_v2",
-           tb_log_name="runner_stage1_v2", ent_coef=0.02, learning_rate=5e-5)"""
-    #python3 -m rl_agent.model
+    # Fresh runner training from scratch (Stage 0):
+    train(trainee_role="runner", total_timesteps=300_000,
+          save_to="trained_model_checkpoints/runner_models/catchy_run_runner_stage0_v0",
+          tb_log_name="runner_stage0_v0")
+    # python3 -m rl_agent.model

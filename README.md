@@ -84,9 +84,9 @@ Rewards: `±1.0` to the winner / loser on termination, `0.0` on every other step
 
 ## RL training
 
-The `rl_agent/` package wraps the engine for training. The engine's own reward is sparse — `±1` on termination, `0` otherwise — so `rl_agent/reward_shaping.py` adds per-step shaping signals on top of it. A shared `RewardShaper` base class owns common helpers; `RunnerRewardShaper` and `CatcherRewardShaper` subclass it with role-specific signals, and `environment.py` picks the right one at construction time.
+The `rl_agent/` package wraps the engine for training. Only the **runner** is trained; the catcher is always a fixed heuristic or pre-trained opponent.
 
-The **runner** shaper layers on:
+The engine's own reward is sparse — `±1` on termination, `0` otherwise — so `rl_agent/reward_shaping.py` adds per-step shaping signals via `RunnerRewardShaper`:
 
 - capture bonus per special collected,
 - alive bonus,
@@ -97,13 +97,7 @@ The **runner** shaper layers on:
 - urgency penalty: `-URGENCY_COEFF · (SPECIAL_MAJORITY − captured) · (turn / TURN_LIMIT)`, which gives the runner a growing nudge toward the 4-capture win threshold as the clock runs down, and disengages once that threshold is reached,
 - unsafe-capture penalty: on a capture turn, `-UNSAFE_CAPTURE_PENALTY` when the runner captures a special with `cheb(runner, prev.catcher_pos) ≤ 1`, **plus** a second application of the projectile-threat penalty when the captured cell sits in a bullet's next-two danger window — so grabbing a square by walking into a bullet's path is punished twice (once via the projectile threat term, once here).
 
-The **catcher** shaper keeps the task signals minimal and makes the dense terms *potential-based* so the terminal verdict always dominates. Three components:
-
-- **special-defense bonus / bullet-spam penalty**: a one-shot evaluation on the turn a bullet is fired. If the new bullet's ray covers an uncaptured special that the runner is poised to reach (cheb ≤ 3 from catcher with a 1-turn runner reach, or cheb 4–5 with a 2-turn runner reach), the catcher gets `+SPECIAL_DEFENSE_COEFF` (`0.10`). Any other shot is spam: `-BULLET_SPAM_PENALTY` (`0.15`, hard — kept `≥` the bonus so net shooting is non-farmable). No further reward accrues from that bullet on subsequent turns, so the catcher cannot pad shaping by hoarding flying bullets.
-- **catch bonus**: `+CATCH_BONUS` (`2.0`) on top of the engine's terminal `+1` whenever the catcher *actually catches* the runner — a step-kill or a bullet-kill. A timeout win does **not** earn it. This is the dominant signal (`+3` total), so closing the kill outweighs every per-step term combined. Because the catch is a terminal event, the catcher shaper overrides `shape()` to apply this bonus in the terminal branch.
-- **potential-based dense shaping**: a single potential `Φ(s) = SQUARE_POTENTIAL_COEFF · (uncaptured specials) − DISTANCE_COEFF · manhattan(runner, catcher)` with the per-step reward `F = Φ(curr) − Φ(prev)` (γ = 1). It resolves to `−SQUARE_POTENTIAL_COEFF` (`0.03`) per square the runner just captured — teaching square defense — plus `+DISTANCE_COEFF` (`0.01`) per unit the catcher closes the **Manhattan** gap — teaching it to close and corner. Because the term telescopes, neither part can accumulate across an episode past the terminal `±1`, so the win/lose signal can never be out-earned by per-step shaping.
-
-That's the whole catcher shaper — no special-blocking attraction, chase, or time-advantage terms. The intent is to hand the catcher the minimum task signals (catch the runner, defend squares, close distance, shoot well) without a dense surface it can hack. See `rl_agent/environment_explanations/catcher_reward_shaping.md` for the derivation.
+See `rl_agent/environment_explanations/reward_shaping.md` for the full derivation.
 
 ## Project layout
 
@@ -113,26 +107,23 @@ catchy_run_game/
   actions.py           Action index constants + ACTION_NAMES.
   agents/
     heuristic.py       Greedy baselines.
-    rl_catcher.py
-    rl_runner.py
+    rl_runner.py       Loads the trained runner checkpoint for in-game play.
   render/
     pygame_app.py      pygame renderer + click handlers.
   main.py              Entry point.
 rl_agent/
-  environment.py       Gymnasium-style wrapper around the engine.
-  reward_shaping.py    RewardShaper base + RunnerRewardShaper / CatcherRewardShaper subclasses.
-  model.py             Policy / value network construction. Role-aware training entry point.
+  environment.py       Gymnasium-style wrapper around the engine (runner trainee only).
+  reward_shaping.py    RewardShaper base + RunnerRewardShaper.
+  model.py             MaskablePPO training entry point for the runner.
   custom_cnn.py        CNN feature extractor for the 9-channel observation.
-  opponents.py         Opponent providers used during training.
-  evaluation.py        Evaluation harness for trained policies (runner and catcher metrics).
-  trace_rewards.py     Per-component trace tool for either shaper.
+  opponents.py         Catcher opponent providers: heuristic_opponent, defensive_shooter_opponent, make_rl_opponent.
+  evaluation.py        Evaluation harness for the runner.
+  trace_rewards.py     Per-component reward trace tool for the runner shaper.
   environment_explanations/
-    reward_shaping.md          Deep doc for RunnerRewardShaper.
-    catcher_reward_shaping.md  Deep doc for CatcherRewardShaper.
-    opponent_structure.md      Deep doc for opponents.py.
+    reward_shaping.md        Deep doc for RunnerRewardShaper.
+    opponent_structure.md    Deep doc for opponents.py.
 tests/
   test_engine.py
-trained_model_checkpoints/      The models that are used while playing against AI
-  catcher_models/       Catcher model is not trained
-  runner_models/        Runner model can effectively play, it still cannot dodge bullets.
+trained_model_checkpoints/
+  runner_models/        Runner model checkpoints. Runner can effectively play; bullet dodging is still improving.
 ```

@@ -3,7 +3,7 @@ import numpy as np
 import gymnasium as gym
 from gymnasium.utils.env_checker import check_env
 from catchy_run_game import engine as engine
-from rl_agent.reward_shaping import RunnerRewardShaper, CatcherRewardShaper
+from rl_agent.reward_shaping import RunnerRewardShaper
 
 class CatchyRunEnv(gym.Env):
 
@@ -30,10 +30,7 @@ class CatchyRunEnv(gym.Env):
         self.action_space = gym.spaces.Discrete(16)
         self.state: Optional[engine.GameState] = None
         self.trainee_role: engine.Agent = trainee_role
-        if trainee_role == "runner":
-            self.reward_shaper = RunnerRewardShaper()
-        else:
-            self.reward_shaper = CatcherRewardShaper()
+        self.reward_shaper = RunnerRewardShaper()
 
     #Extract the observation from the engine + add the perspective channel at the start
     def _obs(self) -> np.ndarray:
@@ -74,10 +71,9 @@ class CatchyRunEnv(gym.Env):
         mask = engine.legal_action_mask(self.state)
         if not mask[opp_action]:
             opp_action = int(self.np_random.choice(np.flatnonzero(mask)))
-        new_state, r_runner, r_catcher, terminated, _, _ = engine.step(self.state, opp_action)
+        new_state, r_runner, _, terminated, _, _ = engine.step(self.state, opp_action)
         self.state = new_state
-        trainee_reward = r_runner if self.trainee_role == "runner" else r_catcher
-        return trainee_reward, terminated
+        return r_runner, terminated
 
     def reset(self, *, seed=None, options = None):
         super().reset(seed=seed)
@@ -92,9 +88,9 @@ class CatchyRunEnv(gym.Env):
         if not mask[action]:
             action = int(self.np_random.choice(np.flatnonzero(mask)))
         prev_state = self.state
-        new_state, r_runner, r_catcher, terminated, _, _ = engine.step(self.state, action)
+        new_state, r_runner, _, terminated, _, _ = engine.step(self.state, action)
         self.state = new_state
-        reward = r_runner if self.trainee_role == "runner" else r_catcher
+        reward = r_runner
         if not terminated:
             opp_reward, terminated = self._play_opponent_turn()
             reward += opp_reward

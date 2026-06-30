@@ -16,10 +16,10 @@ state: it stores the trainee's role and the tunables, exposes one public
 method (`shape`), and keeps each reward component in its own private method
 so the components are easy to tune in isolation.
 
-It only shapes for the **runner** trainee. For a catcher trainee — or any
-transition where `curr.terminated` is `True` — `shape` short-circuits and
-returns the engine reward unchanged. Every component below is runner-specific
-and only meaningful while the game is ongoing.
+It only shapes for the **runner**. On any transition where `curr.terminated`
+is `True`, `shape` short-circuits and returns the engine reward unchanged.
+Every component below is runner-specific and only meaningful while the game is
+ongoing.
 
 ## Tunables (class attributes)
 

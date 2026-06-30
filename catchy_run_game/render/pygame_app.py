@@ -25,7 +25,7 @@ from ..actions import (
     MOVE_ACTIONS,
     SPECIAL_ACTIONS,
 )
-from ..agents.rl_catcher import rl_catcher_policy
+from ..agents import heuristic
 from ..agents.rl_runner import rl_runner_policy
 
 # --- Layout --------------------------------------------------------------
@@ -200,7 +200,7 @@ class App:
         gm_entries = [
             (Y_BTN_GM_1, "Human vs. Human", f"gm:{GM_HVH}"),
             (Y_BTN_GM_2, "Human catcher (RL runner)", f"gm:{GM_AI_RUNNER_RL}"),
-            (Y_BTN_GM_3, "Human runner (RL catcher)", f"gm:{GM_AI_CATCHER_RL}"),
+            (Y_BTN_GM_3, "Human runner (Heuristic catcher)", f"gm:{GM_AI_CATCHER_RL}"),
         ]
         for y, label, key in gm_entries:
             buttons.append(Button(
@@ -255,13 +255,7 @@ class App:
                 self.ai_pending_at = None
                 return
         else:
-            try:
-                action = rl_catcher_policy(self.state, self.rng)
-            except Exception as e:
-                print(f"[pygame_app] RL catcher failed: {e}\nFalling back to HVH.")
-                self.game_mode = GM_HVH
-                self.ai_pending_at = None
-                return
+            action = heuristic.shooting_catcher_policy(self.state, self.rng)
         new_state, *_ = engine.step(self.state, action)
         self.state = new_state
         if self._is_ai_turn():

@@ -1,9 +1,8 @@
 """Tests for the defensive shooting catcher opponent.
 
-The opponent must fire exactly when the CatcherRewardShaper's special-defense
-bonus would pay out, and otherwise fall back to a chasing move. These tests
-pin the trigger to a controlled board and cross-check it against the reward
-shaper so the duplicated scan in opponents.py cannot silently drift.
+The opponent must fire when a special square on the catcher's shoot ray is
+imminently reachable by the runner, and fall back to a chasing move otherwise.
+These tests pin the trigger to a controlled board.
 """
 
 from __future__ import annotations
@@ -12,11 +11,10 @@ import random
 
 from catchy_run_game import engine
 from catchy_run_game.actions import ACTION_SPECIAL_S, DIRECTIONS_8
-from rl_agent.opponents import (
-    defensive_shooter_opponent,
+from catchy_run_game.agents.heuristic import (
+    shooting_catcher_policy as defensive_shooter_opponent,
     _pick_defensive_shot,
 )
-from rl_agent.reward_shaping import CatcherRewardShaper
 
 
 def _catcher_state(**overrides):
@@ -47,15 +45,12 @@ def test_shoots_south_to_defend_reachable_special():
     assert action == ACTION_SPECIAL_S
 
 
-def test_shot_matches_reward_special_defense_bonus():
-    # The chosen shot, when actually fired, must score the special-defense bonus.
+def test_fires_when_special_reachable():
+    # When the special is on the shoot ray and reachable, the action must be a
+    # shoot (index >= 8), not a move.
     state = _catcher_state()
     action = defensive_shooter_opponent(state, random.Random(0))
-    curr, *_ = engine.step(state, action)
-
-    shaper = CatcherRewardShaper()
-    bonus = shaper._special_defense_bonus(state, curr)
-    assert bonus == CatcherRewardShaper.SPECIAL_DEFENSE_COEFF
+    assert action >= 8
 
 
 def test_no_shot_when_special_unreachable_falls_back_to_move():
