@@ -75,13 +75,13 @@ def train(trainee_role: Agent,
 
 if __name__ == "__main__":
     # Continue runner training from latest checkpoint:
-    # train(load_from="trained_model_checkpoints/runner_models/catchy_run_runner_stage1_v2",
-    #       total_timesteps=400_000, trainee_role="runner",
-    #       save_to="trained_model_checkpoints/runner_models/catchy_run_runner_stage1_v3",
-    #       tb_log_name="runner_stage1_v3", ent_coef=0.02, learning_rate=5e-5)
+    train(load_from="trained_model_checkpoints/runner_models/catchy_run_runner_stage1_v2",
+           total_timesteps=500_000, trainee_role="runner",
+           save_to="trained_model_checkpoints/runner_models/catchy_run_runner_stage2_v0",
+           tb_log_name="runner_stage2_v0", ent_coef=0.005, learning_rate=5e-5)
 
     # Fresh runner training from scratch (Stage 0):
-    train(trainee_role="runner", total_timesteps=300_000,
-          save_to="trained_model_checkpoints/runner_models/catchy_run_runner_stage0_v0",
-          tb_log_name="runner_stage0_v0")
+    # train(trainee_role="runner", total_timesteps=500_000,
+    #      save_to="trained_model_checkpoints/runner_models/catchy_run_runner_stage0_v0",
+    #      tb_log_name="runner_stage0_v0")
     # python3 -m rl_agent.model
