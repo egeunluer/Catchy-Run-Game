@@ -78,7 +78,7 @@ if __name__ == "__main__":
     train(load_from="trained_model_checkpoints/runner_models/catchy_run_runner_stage2_v0",
            total_timesteps=500_000, trainee_role="runner",
            save_to="trained_model_checkpoints/runner_models/catchy_run_runner_stage2_v1",
-           tb_log_name="runner_stage2_v0", ent_coef=0.005, learning_rate=3e-5)
+           tb_log_name="runner_stage2_v0", ent_coef=0.005, learning_rate=2e-5)
 
     # Fresh runner training from scratch (Stage 0):
     # train(trainee_role="runner", total_timesteps=500_000,
