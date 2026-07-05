@@ -12,7 +12,7 @@ from typing import Optional
 
 from .. import engine
 
-DEFAULT_MODEL_PATH = "trained_model_checkpoints/runner_models/catchy_run_runner_stage2_v0.zip"
+DEFAULT_MODEL_PATH = "trained_model_checkpoints/runner_models/catchy_run_runner_stage2_v3.zip"
 
 _model = None
 

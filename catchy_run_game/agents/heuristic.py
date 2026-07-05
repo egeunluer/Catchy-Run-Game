@@ -34,6 +34,10 @@ def _chebyshev(p1: tuple[int, int], p2: tuple[int, int]) -> int:
     return max(abs(p1[0] - p2[0]), abs(p1[1] - p2[1]))
 
 
+def _manhattan(p1: tuple[int, int], p2: tuple[int, int]) -> int:
+    return abs(p1[0] - p2[0]) + abs(p1[1] - p2[1])
+
+
 def _score(state: GameState, action: int, role: Agent) -> float:
     """Score `action` from `role`'s perspective. Higher is better."""
     new_state, _, _, terminated, _, _ = step(state, action)
@@ -64,6 +68,11 @@ def _choose(state: GameState, role: Agent, rng: random.Random) -> int:
     scores = [_score(state, a, role) for a in legal]
     best = max(scores)
     best_actions = [a for a, s in zip(legal, scores) if s == best]
+    if role == "catcher" and len(best_actions) > 1:
+        candidates = [(a, step(state, a)[0].catcher_pos) for a in best_actions]
+        if all(_chebyshev(pos, state.runner_pos) == 1 for _, pos in candidates):
+            min_man = min(_manhattan(pos, state.runner_pos) for _, pos in candidates)
+            best_actions = [a for a, pos in candidates if _manhattan(pos, state.runner_pos) == min_man]
     return rng.choice(best_actions)
 
 
@@ -169,7 +178,7 @@ def _defended_special(state: GameState, direction: tuple[int, int]) -> tuple[int
     remaining = state.special_squares - state.captured_squares
     if not remaining:
         return None
-    for k in range(1, _DEFENSE_NEAR_MAX + 1):
+    for k in range(3, _DEFENSE_NEAR_MAX + 1):
         cell = (cx + k * dx, cy + k * dy)
         if not (0 <= cell[0] < BOARD_SIZE and 0 <= cell[1] < BOARD_SIZE):
             break
